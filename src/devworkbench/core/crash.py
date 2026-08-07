@@ -31,13 +31,13 @@ logger = logging.getLogger("devworkbench.crash")
 def install_excepthook(log_dir: str | Path) -> None:
     """Replace ``sys.excepthook`` with one that writes a crash report file.
 
-    Only installed when the previous hook is the interpreter default (i.e. not
-    already wrapped by a test runner / debugger), so pytest and IDEs keep their
-    own error reporting.
+    Only installed when the previous hook is the interpreter default or the
+    ``exceptiongroup`` backport's transparent wrapper (Python 3.9/3.10 — see
+    :func:`_is_default_hook`), i.e. not already customised by a test runner /
+    debugger, so pytest and IDEs keep their own error reporting.
     """
     previous = sys.excepthook
-    default = sys.__excepthook__
-    if previous is not default:
+    if not _is_default_hook(previous):
         logger.debug("excepthook already customised; not wrapping")
         return
 
@@ -52,11 +52,27 @@ def install_excepthook(log_dir: str | Path) -> None:
             path.write_text(lines, encoding="utf-8")
         except OSError:
             logger.error("could not write crash report to %s", path)
-        # Always reach the console / test output too.
-        default(exc_type, exc_value, exc_tb)
+        # Always reach the console / test output too — delegate to whatever
+        # hook was in place before us, keeping wrapper chains intact.
+        previous(exc_type, exc_value, exc_tb)
 
     sys.excepthook = hook
     logger.debug("excepthook installed -> %s", directory)
+
+
+def _is_default_hook(hook: Any) -> bool:
+    """True when ``hook`` is safe to wrap: the interpreter default, or the
+    ``exceptiongroup`` backport's transparent wrapper.
+
+    On Python 3.9/3.10 the ``exceptiongroup`` package (pulled in by pytest)
+    eagerly replaces ``sys.excepthook`` on import; its wrapper delegates to
+    the default for non-ExceptionGroup exceptions, so wrapping it behaves
+    exactly like wrapping the default. Anything else (a debugger, IDE or
+    test-runner hook) is left untouched.
+    """
+    if hook is sys.__excepthook__:
+        return True
+    return getattr(hook, "__name__", "") == "exceptiongroup_excepthook"
 
 
 def install_faulthandler(log_dir: str | Path) -> None:

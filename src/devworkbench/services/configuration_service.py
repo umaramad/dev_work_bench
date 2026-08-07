@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from devworkbench.core.settings import SettingsManager
 from devworkbench.core.events import EventBus
@@ -43,7 +43,9 @@ class SettingKind(str, Enum):
     PATH = "path"  # a filesystem location (file or directory)
 
 
-Validator = Callable[[Any], str | None]
+# NOTE: module-level alias — evaluated at import time, so it must use
+# Optional[...] (not `str | None`, which is 3.10+ syntax at runtime).
+Validator = Callable[[Any], Optional[str]]
 
 
 @dataclass(frozen=True)

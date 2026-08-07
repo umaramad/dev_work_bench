@@ -2,9 +2,9 @@
 
 # 🧰 DevWorkbench
 
-**A lightweight, native developer toolbox for macOS — built with Python 3.12 + PySide6 (Qt Widgets). No Electron, no Flutter.**
+**A lightweight, native developer toolbox for macOS — built with Python 3.9+ + PySide6 (Qt Widgets). No Electron, no Flutter.**
 
-`v0.1.0` · macOS · Python ≥ 3.12 · PySide6 ≥ 6.8 · SQLite
+`v0.1.0` · macOS · Python ≥ 3.9 · PySide6 ≥ 6.8 · SQLite
 
 </div>
 
@@ -81,7 +81,7 @@ Open **`docs/ui/gallery.html`** in a browser to browse all screens.
 ### Prerequisites
 
 - **macOS** (arm64 or x86_64)
-- **Python 3.12+** ([python.org](https://www.python.org/downloads/) or `brew install python@3.12`)
+- **Python 3.9+** ([python.org](https://www.python.org/downloads/) or `brew install python@3.12` — any 3.9–3.14 works)
 
 ### 1. Set up the virtual environment
 
@@ -89,7 +89,7 @@ Open **`docs/ui/gallery.html`** in a browser to browse all screens.
 git clone <your-repo-url> DevWorkbench
 cd DevWorkbench
 
-python3.12 -m venv .venv
+python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 ```
@@ -151,7 +151,7 @@ scripts/make_dmg.sh       hdiutil (built into macOS) → dist/DevWorkbench-<vers
 
 ```bash
 # 1. Environment (first time only)
-python3.12 -m venv .venv
+python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt        # runtime + build + dev deps
 
 # 2. (Optional) regenerate the multi-resolution app icon
@@ -221,7 +221,7 @@ Full details: **`docs/packaging.md`**.
 
 ## 🏗 Architecture
 
-**Stack:** Python 3.12 · PySide6 (Qt **Widgets** only — no QML) · SQLite · PyInstaller · `hdiutil`
+**Stack:** Python 3.9+ · PySide6 (Qt **Widgets** only — no QML) · SQLite · PyInstaller · `hdiutil`
 
 **Patterns:** MVC / service layer, dependency injection (composition root in `bootstrap.py`), Repository pattern, worker-thread background tasks, event-bus decoupling (`settings.changed`, `navigation.request`, …).
 

@@ -1,8 +1,9 @@
 """Configuration loader — TOML (or JSON) files merged over built-in defaults.
 
-Uses the stdlib ``tomllib`` (Python 3.11+), so no third-party dependency is
-needed. Missing files fall back to defaults; dotted keys address nested
-values, e.g. ``get("appearance.font_size")``.
+Uses the stdlib ``tomllib`` (Python 3.11+) or the ``tomli`` backport on
+Python 3.9/3.10, so no heavy TOML dependency is needed. Missing files fall
+back to defaults; dotted keys address nested values, e.g.
+``get("appearance.font_size")``.
 """
 
 from __future__ import annotations
@@ -11,10 +12,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-try:  # pragma: no cover - tomllib exists on 3.11+; guard for older runtimes
+try:  # Python 3.11+ ships tomllib in the stdlib
     import tomllib
-except ImportError:  # pragma: no cover
-    tomllib = None  # type: ignore[assignment]
+except ModuleNotFoundError:  # pragma: no cover - 3.9/3.10 use the tomli backport
+    import tomli as tomllib  # type: ignore[no-redef, import-not-found]
 
 
 class ConfigError(Exception):
@@ -95,10 +96,7 @@ class ConfigLoader:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = data if data is not None else self._data
-        if tomllib is None:
-            target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        else:
-            target.write_text(_dict_to_toml(payload), encoding="utf-8")
+        target.write_text(_dict_to_toml(payload), encoding="utf-8")
         self._data = payload
 
     # -- internals ----------------------------------------------------------------------------
@@ -111,8 +109,6 @@ class ConfigLoader:
                 return json.loads(text)
             except json.JSONDecodeError as exc:
                 raise ConfigError(f"invalid JSON in {path}: {exc}") from exc
-        if tomllib is None:
-            raise ConfigError("TOML support requires Python 3.11+")
         try:
             return tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:

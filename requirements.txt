@@ -7,6 +7,8 @@
 # --- Runtime (declared in pyproject.toml [project.dependencies]) -----------
 # UI framework: QtWidgets/QtCore/QtGui (+ QtSvg) — no Addons → slim & fast.
 PySide6-Essentials>=6.8,<7
+# TOML parsing: stdlib on 3.11+, tomli backport on 3.9/3.10.
+tomli>=2.0; python_version < "3.11"
 
 # --- Optional runtime extras (pyproject.toml [project.optional-dependencies].yaml) ---
 # PyYAML enables semantic YAML comparison; missing -> text fallback.

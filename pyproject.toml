@@ -7,11 +7,14 @@ name = "devworkbench"
 version = "0.1.0"
 description = "DevWorkbench — a lightweight, native developer toolbox for macOS (PySide6 / Qt Widgets)"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 license = { text = "Proprietary" }
 authors = [{ name = "DevWorkbench" }]
 keywords = ["macos", "qt", "pyside6", "diff", "git", "ssh"]
 classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Operating System :: MacOS",
     "Environment :: MacOS X",
@@ -20,6 +23,8 @@ classifiers = [
 dependencies = [
     # UI-only scaffold: QtWidgets/QtCore/QtGui (+ QtSvg) — no Addons → slim & fast.
     "PySide6-Essentials>=6.8",
+    # TOML parsing: stdlib on 3.11+, tomli backport on 3.9/3.10.
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -48,8 +53,8 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py39"
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.9"
 packages = ["src/devworkbench"]
