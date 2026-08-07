@@ -1,0 +1,12 @@
+# DevWorkbench — runtime + build requirements
+#
+# Runtime (also declared in pyproject.toml [project.dependencies]).
+# Keep the two in sync.
+PySide6-Essentials>=6.8,<7
+
+# Build tooling (used by scripts/build.sh, scripts/make_dmg.sh).
+pyinstaller>=6.10
+
+# Optional runtime extras (graceful degradation when absent):
+# PyYAML enables semantic YAML comparison; missing -> text fallback.
+PyYAML>=6.0

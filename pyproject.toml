@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devworkbench"
+version = "0.1.0"
+description = "DevWorkbench — a lightweight, native developer toolbox for macOS (PySide6 / Qt Widgets)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "DevWorkbench" }]
+keywords = ["macos", "qt", "pyside6", "diff", "git", "ssh"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS",
+    "Environment :: MacOS X",
+    "Framework :: Qt",
+]
+dependencies = [
+    # UI-only scaffold: QtWidgets/QtCore/QtGui (+ QtSvg) — no Addons → slim & fast.
+    "PySide6-Essentials>=6.8",
+]
+
+[project.optional-dependencies]
+# Runtime extras (graceful degradation when absent).
+yaml = ["PyYAML>=6.0"]
+# Development / QA.
+dev = ["ruff>=0.5", "pytest>=8", "pytest-qt>=4.4", "mypy>=1.10"]
+# Packaging (used by scripts/build.sh).
+build = ["pyinstaller>=6.10"]
+
+[project.scripts]
+devworkbench = "devworkbench.bootstrap:main"
+
+[project.urls]
+Homepage = "https://freebuff.com"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+devworkbench = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["src/devworkbench"]
