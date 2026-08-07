@@ -1,12 +1,24 @@
-# DevWorkbench — runtime + build requirements
+# DevWorkbench — complete install requirements (run + test + build).
 #
-# Runtime (also declared in pyproject.toml [project.dependencies]).
-# Keep the two in sync.
+# A single `pip install -r requirements.txt` gives you everything needed to
+# run, test, and package DevWorkbench on another machine. Groups mirror the
+# dependency declarations in pyproject.toml — keep the two in sync.
+
+# --- Runtime (declared in pyproject.toml [project.dependencies]) -----------
+# UI framework: QtWidgets/QtCore/QtGui (+ QtSvg) — no Addons → slim & fast.
 PySide6-Essentials>=6.8,<7
 
-# Build tooling (used by scripts/build.sh, scripts/make_dmg.sh).
-pyinstaller>=6.10
-
-# Optional runtime extras (graceful degradation when absent):
+# --- Optional runtime extras (pyproject.toml [project.optional-dependencies].yaml) ---
 # PyYAML enables semantic YAML comparison; missing -> text fallback.
 PyYAML>=6.0
+
+# --- Build tooling (pyproject.toml [project.optional-dependencies].build) ---
+# Used by scripts/build.sh and scripts/make_dmg.sh.
+pyinstaller>=6.10
+
+# --- Development / QA (pyproject.toml [project.optional-dependencies].dev) ---
+# Run tests with: .venv/bin/python -m pytest
+pytest>=8
+# Linting / type checking: ruff check .  /  mypy src
+ruff>=0.5
+mypy>=1.10

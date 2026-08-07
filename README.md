@@ -94,7 +94,7 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-> `requirements.txt` installs the runtime (`PySide6-Essentials`, optional `PyYAML`) **and** the build tooling (`pyinstaller`). For development extras (pytest, ruff, mypy) use instead:
+> `requirements.txt` is complete: runtime (`PySide6-Essentials`, optional `PyYAML`), build tooling (`pyinstaller`) **and** development / QA tools (`pytest`, `ruff`, `mypy`) — so the same command works on a fresh machine, whether you run, test, or package. Installing editable extras works too:
 >
 > ```bash
 > .venv/bin/python -m pip install -e ".[dev,yaml,build]"
@@ -152,7 +152,7 @@ scripts/make_dmg.sh       hdiutil (built into macOS) → dist/DevWorkbench-<vers
 ```bash
 # 1. Environment (first time only)
 python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt        # runtime + PyInstaller
+.venv/bin/python -m pip install -r requirements.txt        # runtime + build + dev deps
 
 # 2. (Optional) regenerate the multi-resolution app icon
 .venv/bin/python scripts/make_icon.py
