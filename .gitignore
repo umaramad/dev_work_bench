@@ -17,7 +17,9 @@ data/
 *.db-wal
 tests/
 packaging/
-docs/
+docs/*
+!docs/superpowers/
+!docs/superpowers/**/
 
 # OS
 .DS_Store
