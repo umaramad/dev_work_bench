@@ -2,10 +2,11 @@
 # DevWorkbench — build & deploy menu.
 #
 #   ./build_deploy.sh              # interactive menu
-#   ./build_deploy.sh local        # run from source (dev mode)
-#   ./build_deploy.sh build        # build release .app only
-#   ./build_deploy.sh dmg          # build release .app + portable .dmg
-#   ./build_deploy.sh debug        # build debug .app (console visible)
+#   ./build_deploy.sh local        # run the Flet UI from source (dev mode)
+#   ./build_deploy.sh build        # build release Flet .app only
+#   ./build_deploy.sh dmg          # build release Flet .app + portable .dmg
+#   ./build_deploy.sh debug        # build debug Flet .app (console visible)
+#   ./build_deploy.sh qt           # build legacy PySide6 .app (not used for DMG)
 #   ./build_deploy.sh tests        # run the test suite
 #   ./build_deploy.sh bump [patch|minor|major]   # bump version
 #   ./build_deploy.sh version      # print current version
@@ -13,7 +14,7 @@
 #   ./build_deploy.sh doctor       # check prerequisites
 #
 # With no argument the script prompts for an option — choose "1. Run locally"
-# to start the app from source, or "3. Build + portable DMG" to produce
+# to start the Flet UI from source, or "3. Build + portable DMG" to produce
 # dist/DevWorkbench-<version>.dmg ready to distribute.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -51,34 +52,46 @@ require_pyinstaller() {
     "$PYTHON" -c "import PyInstaller" 2>/dev/null || die "PyInstaller missing — run: .venv/bin/python -m pip install -r requirements.txt"
 }
 
+require_flet() {
+    "$PYTHON" -c "import flet" 2>/dev/null || die "Flet missing — run: .venv/bin/python -m pip install -e '.[flet]'"
+}
+
 # --- actions ----------------------------------------------------------------
 run_local() {
-    require_venv
-    ok "running DevWorkbench from source (Ctrl-C to quit)"
-    exec scripts/dev.sh
+    require_venv; require_flet
+    ok "running DevWorkbench Flet UI from source (Ctrl-C to quit)"
+    exec "$PYTHON" main.py
 }
 
 build_release() {
-    require_venv; require_pyinstaller
-    ok "building release .app v$VERSION"
+    require_venv; require_flet; require_pyinstaller
+    ok "building release Flet .app v$VERSION"
     scripts/build.sh release
-    ok "done: dist/DevWorkbench.app"
+    ok "done: dist/DevWorkbench.app  (Flet UI)"
 }
 
 build_debug() {
-    require_venv; require_pyinstaller
-    ok "building debug .app v$VERSION (console visible)"
+    require_venv; require_flet; require_pyinstaller
+    ok "building debug Flet .app v$VERSION (console visible)"
     scripts/build.sh debug
-    ok "done: dist/DevWorkbench-dbg/DevWorkbench.app"
+    ok "done: dist/DevWorkbench-dbg/DevWorkbench.app  (Flet UI)"
+}
+
+build_qt() {
+    require_venv; require_pyinstaller
+    ok "building legacy PySide6 .app v$VERSION"
+    scripts/build.sh qt
+    ok "done: dist/DevWorkbench.app  (PySide6 UI — not used for DMG)"
 }
 
 build_dmg() {
     build_release
     [[ -d dist/DevWorkbench.app ]] || die "dist/DevWorkbench.app not found — run 'build' first"
-    ok "packaging portable DMG"
+    ok "packaging portable DMG (Flet UI)"
     scripts/make_dmg.sh
     ok "done: dist/DevWorkbench-$VERSION.dmg  (drag into /Applications)"
     note "verify: hdiutil verify dist/DevWorkbench-$VERSION.dmg"
+    note "the .app inside launches the Flet UI (same as ./build_deploy.sh local)"
 }
 
 run_tests() {
@@ -112,7 +125,9 @@ doctor() {
     require_venv
     echo "${C_BOLD}prerequisites:${C_RESET}"
     note "  python : $($PYTHON --version 2>&1)"
-    if "$PYTHON" -c "import PySide6" 2>/dev/null; then note "  PySide6: present"; else note "  PySide6: ${C_RED}missing${C_RESET}"; fi
+    if "$PYTHON" -c "import flet" 2>/dev/null; then note "  Flet: present"; else note "  Flet: ${C_RED}missing${C_RESET} (needed for local run + DMG)"; fi
+    if [[ -x .venv/bin/flet ]]; then note "  flet CLI: present"; else note "  flet CLI: ${C_RED}missing${C_RESET}"; fi
+    if "$PYTHON" -c "import PySide6" 2>/dev/null; then note "  PySide6: present (optional / legacy)"; else note "  PySide6: absent"; fi
     if "$PYTHON" -c "import PyInstaller" 2>/dev/null; then note "  PyInstaller: present"; else note "  PyInstaller: ${C_RED}missing${C_RESET} (needed for build/dmg)"; fi
     echo
     ok "done"
@@ -122,10 +137,10 @@ doctor() {
 menu() {
     banner
     echo "${C_BOLD}Choose an option:${C_RESET}"
-    echo "  ${C_CYN}1${C_RESET}) Run locally (from source)"
-    echo "  ${C_CYN}2${C_RESET}) Build release .app"
-    echo "  ${C_CYN}3${C_RESET}) Build release .app + portable DMG"
-    echo "  ${C_CYN}4${C_RESET}) Build debug .app (console visible)"
+    echo "  ${C_CYN}1${C_RESET}) Run locally — Flet UI (from source)"
+    echo "  ${C_CYN}2${C_RESET}) Build release Flet .app"
+    echo "  ${C_CYN}3${C_RESET}) Build release Flet .app + portable DMG"
+    echo "  ${C_CYN}4${C_RESET}) Build debug Flet .app (console visible)"
     echo "  ${C_CYN}5${C_RESET}) Run tests"
     echo "  ${C_CYN}6${C_RESET}) Bump version (patch)"
     echo "  ${C_CYN}7${C_RESET}) Version bump helper — pick patch/minor/major"
@@ -165,6 +180,7 @@ case "$ACTION" in
     build|app)       build_release ;;
     dmg|deploy)      build_dmg ;;
     debug)           build_debug ;;
+    qt|pyside)       build_qt ;;
     tests|test)      run_tests ;;
     bump)            shift; bump_version "${1:-patch}" ;;
     version)         echo "$VERSION" ;;

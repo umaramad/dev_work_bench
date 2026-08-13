@@ -64,7 +64,19 @@ class Paths:
     @property
     def resources_dir(self) -> Path:
         if self._frozen:
-            return Path(sys.executable).resolve().parent.parent / "Resources"
+            # flet pack / PyInstaller layouts differ slightly — probe common spots.
+            exe = Path(sys.executable).resolve()
+            meipass = Path(getattr(sys, "_MEIPASS", exe.parent))
+            candidates = (
+                exe.parent.parent / "Resources" / "resources",
+                exe.parent.parent / "Resources",
+                meipass / "resources",
+                exe.parent / "resources",
+            )
+            for candidate in candidates:
+                if candidate.is_dir():
+                    return candidate
+            return exe.parent.parent / "Resources"
         return self._source_root / "resources"
 
     # -- helpers ----------------------------------------------------------------------
