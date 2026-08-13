@@ -140,6 +140,9 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.output)
         dock.setMinimumHeight(150)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        # Console / command log / tasks stay minimized by default — the user
+        # opens the Output panel on demand (View → Output / toolbar / palette).
+        dock.hide()
         self._output_dock = dock
 
     def _build_details(self) -> None:
@@ -263,16 +266,20 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
-        toolbar.addAction(self._action("Open…", "open", self._not_wired))
-        toolbar.addAction(self._action("Refresh", "refresh", self._not_wired))
-        toolbar.addSeparator()
+        # Toolbar actions kept out of the toolbar for now (product request):
+        # Open / Refresh / Run / Stop are not wired to real behavior yet. The
+        # Run/Stop actions stay alive so the worker plumbing and tests keep
+        # working; re-enable by adding the actions below back to the toolbar.
+        # toolbar.addAction(self._action("Open…", "open", self._not_wired))
+        # toolbar.addAction(self._action("Refresh", "refresh", self._not_wired))
+        # toolbar.addSeparator()
         self._run_action = self._action("Run", "play", self._run_task)
         self._stop_action = self._action("Stop", "stop", self._stop_task, enabled=False)
         self._run_worker = None
         self._task_row: int | None = None
-        toolbar.addAction(self._run_action)
-        toolbar.addAction(self._stop_action)
-        toolbar.addSeparator()
+        # toolbar.addAction(self._run_action)
+        # toolbar.addAction(self._stop_action)
+        # toolbar.addSeparator()
         toolbar.addAction(self._action("Command Palette", "search", self._open_palette))
         toolbar.addSeparator()
         toolbar.addAction(self._dock_actions["nav"])

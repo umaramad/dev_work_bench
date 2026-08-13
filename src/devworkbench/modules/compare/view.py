@@ -260,7 +260,8 @@ def build_view(icons, ctx=None) -> QWidget:
     folder_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     folder_tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     folder_tree.setRootIsDecorated(True)
-    folder_tree.setIndentation(16)
+    folder_tree.setAnimated(True)  # smooth expand/collapse for the folder tree
+    folder_tree.setIndentation(20)
     folder_tree.setSortingEnabled(False)  # children keep the engine's path order
     folder_page_layout.addWidget(folder_tree, 1)
     stack.addWidget(folder_page)
@@ -596,9 +597,24 @@ def build_view(icons, ctx=None) -> QWidget:
         dir_counters: dict[str, dict[str, int]] = {}
         root_item = folder_tree.invisibleRootItem()
 
+        # Root node names both folders so the tree is self-describing, and
+        # summarizes the whole comparison in its State column.
+        left_name = os.path.basename((result.left or "").rstrip("/")) or (result.left or "left")
+        right_name = os.path.basename((result.right or "").rstrip("/")) or (result.right or "right")
+        root = QTreeWidgetItem(["", f"{left_name}  ⇄  {right_name}"])
+        root.setData(0, Qt.ItemDataRole.UserRole, None)
+        root.setData(0, _PURE_ROLE, False)  # the root row is never hidden by the filter
+        root.setIcon(1, icons.get("compare", 14))
+        root.setForeground(1, QColor(colors["text2"]))
+        root_font = root.font(1)
+        root_font.setBold(True)
+        root.setFont(1, root_font)
+        root.setToolTip(1, f"{result.left or ''}\n⇄\n{result.right or ''}")
+        root_item.addChild(root)
+
         def ensure_dir(segments: list[str]) -> QTreeWidgetItem:
             """The (created-on-demand) tree node for a directory path."""
-            node = root_item
+            node = root
             path = ""
             for seg in segments:
                 path = f"{path}/{seg}" if path else seg
@@ -607,6 +623,7 @@ def build_view(icons, ctx=None) -> QWidget:
                     existing = QTreeWidgetItem([""])
                     existing.setData(0, Qt.ItemDataRole.UserRole, None)
                     existing.setForeground(0, QColor(colors["text3"]))
+                    existing.setIcon(1, icons.get("folder", 14))
                     existing.setText(1, f"{seg}/")
                     node.addChild(existing)
                     nodes[path] = existing
@@ -663,6 +680,7 @@ def build_view(icons, ctx=None) -> QWidget:
             # just their basename; the tooltip keeps the full path.
             path_text = _folder_tree_path(entry)
             item.setText(1, path_text)
+            item.setIcon(1, icons.get("file", 14))
             item.setToolTip(1, _folder_path_text(entry))
             item.setText(2, _fmt_size(entry.left_size))
             item.setText(3, _fmt_size(entry.right_size))
@@ -681,6 +699,12 @@ def build_view(icons, ctx=None) -> QWidget:
                 node.setText(0, label)
                 node.setForeground(0, QColor(colors[token]))
                 node.setToolTip(0, _dir_aggregate_tooltip(path, counter))
+        # Root row summarizes the whole comparison.
+        root_label, root_token = _dir_aggregate(counts)
+        if root_label:
+            root.setText(0, root_label)
+            root.setForeground(0, QColor(colors[root_token]))
+            root.setToolTip(0, _dir_aggregate_tooltip(f"{left_name} ⇄ {right_name}", counts))
         # Mark which directories contain any difference (for the
         # Hide-identical filter): a dir is pure when none of its subtree's
         # files differ and it is not a stray one-sided directory.

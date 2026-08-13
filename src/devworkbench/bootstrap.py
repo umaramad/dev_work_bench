@@ -127,7 +127,18 @@ def main(argv: list[str] | None = None) -> int:
     icons = IconProvider()
     ctx = ModuleContext(container)
     window = MainWindow(modules=MODULES, icons=icons, theme_manager=theme, ctx=ctx)
-    window.setWindowIcon(icons.get("app", 32))
+    # Window + Dock icon: prefer the packaged .icns so a dev run matches the
+    # bundled .app; fall back to the programmatic logo glyph when the asset
+    # is unavailable (e.g. a stripped checkout).
+    app_icon = paths.resources_dir / "icons" / "DevWorkbench.icns"
+    if app_icon.exists():
+        from PySide6.QtGui import QIcon
+
+        application_icon = QIcon(str(app_icon))
+        app.setWindowIcon(application_icon)
+        window.setWindowIcon(application_icon)
+    else:
+        window.setWindowIcon(icons.get("app", 32))
     window.show()
     app.aboutToQuit.connect(database.close)
     code = app.exec()

@@ -31,7 +31,7 @@ dependencies = [
 # Runtime extras (graceful degradation when absent).
 yaml = ["PyYAML>=6.0"]
 # Development / QA.
-dev = ["ruff>=0.5", "pytest>=8", "mypy>=1.10"]
+dev = ["ruff>=0.5", "pytest>=8", "mypy>=1.10,<2"]  # <2: mypy 2.x dropped the Python 3.9 target used in [tool.mypy]
 # Packaging (used by scripts/build.sh).
 build = ["pyinstaller>=6.10"]
 

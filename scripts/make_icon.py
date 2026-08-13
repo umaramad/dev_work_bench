@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Generate the macOS application icon (``resources/icons/DevWorkbench.icns``).
 
-The icon is the programmatic "app" glyph from ``ui/icons.py`` drawn at
-1024×1024, downscaled with ``sips`` to the iconset sizes macOS expects, then
-packed into a single ``.icns`` with ``iconutil`` (an Xcode/macOS tool).
+The icon is the programmatic "app" logo from ``ui/icons.py`` drawn at
+1024×1024 on a transparent canvas (rounded tile + margins, macOS icon
+style), downscaled with ``sips`` to the iconset sizes macOS expects, then
+packed into a single ``.icns`` with ``iconutil`` (an Xcode/macOS tool). A
+``DevWorkbench.png`` preview is written next to the .icns for eyeballing.
 
 Usage:
     .venv/bin/python scripts/make_icon.py [--size 1024] [--out resources/icons]
 
-The app glyph is theme-agnostic (uses the dark-theme token set) and matches
-the in-app sidebar / dock icon drawn by ``IconProvider``.
+The logo is theme-agnostic (reads the dark-theme token set via
+``current_colors``) and matches the in-app window / dock icon drawn by
+``IconProvider``.
 """
 
 from __future__ import annotations
@@ -38,20 +41,25 @@ _ICONSET_SIZES = {
 
 
 def render_base(out: Path, size: int) -> None:
-    """Draw the app glyph into a square PNG at ``size`` pixels (device 1x)."""
+    """Draw the app logo into a square PNG at ``size`` pixels (device 1x).
+
+    The canvas stays transparent so the rounded tile + margins become the
+    icon's shape (macOS icon style).
+    """
     import os
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import QSize
-    from PySide6.QtGui import QImage, QPainter, QColor
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage, QPainter
 
     from devworkbench.ui.icons import _glyph_app
     from devworkbench.ui.theme import DARK
 
     image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(QColor(DARK["bg"]))
+    image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
     _glyph_app(painter, size, QColor(DARK["text"]))
     painter.end()
     image.save(str(out))
@@ -91,9 +99,13 @@ def main() -> int:
         check=True,
     )
 
+    # A high-res PNG preview next to the .icns (also handy for docs/GRT).
+    preview = args.out / "DevWorkbench.png"
+    shutil.copy(base, preview)
+
     shutil.rmtree(iconset)
     base.unlink(missing_ok=True)
-    print(f"wrote {icns} ({icns.stat().st_size / 1024:.0f} KB)")
+    print(f"wrote {icns} ({icns.stat().st_size / 1024:.0f} KB) and {preview.name}")
     return 0
 
 

@@ -15,7 +15,16 @@ from __future__ import annotations
 from functools import lru_cache
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtCore import QLineF
 
 from devworkbench.ui.theme import current_colors
@@ -99,26 +108,74 @@ def _glyph_circle(p: QPainter, s: int, c: QColor) -> None:
 
 
 def _glyph_app(p: QPainter, s: int, c: QColor) -> None:
-    box = _centered(s * 0.82, s)
-    r = QRectF(box.x(), box.y(), box.width(), box.height())
+    """App logo: a rounded workbench tile holding a terminal window with a
+    ``>_`` prompt and a muted code line — reads as a developer console at
+    any size (16px menu glyph up to the 1024px app icon). Theme tokens are
+    read live, so the icon keeps the app's accent color."""
+    colors = current_colors()
+    accent = QColor(colors.get("accent", c.name()))
+    bg = QColor(colors.get("bg", "#16171c"))
+    surface = QColor(colors.get("surface", "#1f2126"))
+    surface2 = QColor(colors.get("surface2", "#262a32"))
+    text3 = QColor(colors.get("text3", "#6d7686"))
+
+    # -- tile: subtle vertical gradient + a faint accent rim -----------------
+    m = s * 0.055
+    tile = QRectF(m, m, s - 2 * m, s - 2 * m)
     path = QPainterPath()
-    path.addRoundedRect(r, s * 0.2, s * 0.2)
-    p.setPen(_pen(c, 1.4))
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawPath(path)
-    # three code lines + accent dot
-    line_pen = _pen(c, 1.3)
-    p.setPen(line_pen)
-    y0 = r.y() + s * 0.30
-    step = s * 0.16
-    left = r.x() + s * 0.22
-    right = r.x() + r.width() - s * 0.22
-    for i in range(3):
-        y = y0 + i * step
-        p.drawLine(QPointF(left, y), QPointF(right * 0.55 if i != 2 else right, y))
+    path.addRoundedRect(tile, s * 0.21, s * 0.21)
+    gradient = QLinearGradient(tile.topLeft(), tile.bottomLeft())
+    gradient.setColorAt(0.0, surface2)
+    gradient.setColorAt(1.0, surface)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor(current_colors()["accent"]))
-    p.drawEllipse(QPointF(r.x() + r.width() - s * 0.28, r.y() + s * 0.28), s * 0.09, s * 0.09)
+    p.setBrush(QBrush(gradient))
+    p.drawPath(path)
+    rim = QColor(accent)
+    rim.setAlpha(85)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(rim, max(1.0, s * 0.012)))
+    p.drawPath(path)
+
+    # -- terminal window ------------------------------------------------------
+    win = QRectF(s * 0.24, s * 0.30, s * 0.52, s * 0.40)
+    win_path = QPainterPath()
+    win_path.addRoundedRect(win, s * 0.06, s * 0.06)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(bg)
+    p.drawPath(win_path)
+    border = QColor(text3)
+    border.setAlpha(120)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(border, max(1.0, s * 0.010)))
+    p.drawPath(win_path)
+
+    # traffic lights (red / amber / green)
+    dot_r = s * 0.022
+    dot_y = win.top() + s * 0.055
+    p.setPen(Qt.PenStyle.NoPen)
+    for i, key in enumerate(("red", "amber", "green")):
+        dot = QColor(colors.get(key, "#888888"))
+        p.setBrush(dot)
+        p.drawEllipse(QPointF(win.left() + s * 0.075 + i * s * 0.055, dot_y), dot_r, dot_r)
+
+    # ``>`` prompt chevron in the accent color
+    prompt = QPen(accent, max(1.2, s * 0.042))
+    prompt.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(prompt)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    cx = win.left() + s * 0.115
+    cy = s * 0.49
+    arm = s * 0.035
+    p.drawLine(QPointF(cx, cy - arm), QPointF(cx + arm * 1.5, cy))
+    p.drawLine(QPointF(cx, cy + arm), QPointF(cx + arm * 1.5, cy))
+    # ``_`` cursor
+    p.drawLine(QPointF(win.left() + s * 0.205, cy), QPointF(win.left() + s * 0.30, cy))
+
+    # muted code line
+    code = QPen(text3, max(1.0, s * 0.026))
+    code.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(code)
+    p.drawLine(QPointF(win.left() + s * 0.115, s * 0.615), QPointF(win.left() + s * 0.335, s * 0.615))
 
 
 def _glyph_compare(p: QPainter, s: int, c: QColor) -> None:

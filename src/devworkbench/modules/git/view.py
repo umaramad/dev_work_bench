@@ -1,10 +1,11 @@
-"""Git screen — favorite-folder landing page + per-folder repository tabs.
+"""Git screen — group-tile landing page + per-folder repository tabs.
 
-Tab 0 ("Folders") is the landing page: every folder you have pinned for
-frequent git work (``favorites`` table, kind="folder"). Each opened folder
-gets its **own tab inside the Git screen**, so you can keep several
-repositories open side by side and jump back to the landing page at any
-time to open another one. Opening a folder runs a real ``GitWorker``
+Tab 0 ("Folders") is the landing page, organized as a drill-down: group
+tiles (``favorites`` table, kind="folder", grouped by ``group_name``), then
+the repositories of the selected group, then (via a card's Open button) the
+repository's own tab. Each opened folder gets its **own tab inside the Git
+screen**, so you can keep several repositories open side by side and jump
+back to the landing page at any time to open another one. Opening a folder runs a real ``GitWorker``
 (subprocess git): each tab offers Fetch, Pull (rebase), Status, Recent
 commits, and Fetch-all — the last scans the folder's subfolders and runs
 ``git fetch`` in every nested repository (workspaces with multiple
@@ -26,10 +27,12 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QPlainTextEdit,
+    QPushButton,
     QStackedWidget,
     QTabBar,
     QTabWidget,
@@ -41,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from devworkbench.models.persistence import Favorite
 from devworkbench.modules.base import Module
-from devworkbench.modules.git.dialog import GroupManagerDialog, RepoDialog
+from devworkbench.modules.git.dialog import GroupManagerDialog, RepoDialog, ScanReposDialog
 from devworkbench.ui.samples import GIT_REPOS
 from devworkbench.ui.theme import current_colors
 from devworkbench.ui.widgets.common import button, clear_list_widget, icon_button, search_field, styled_label
@@ -89,6 +92,10 @@ def build_view(icons, ctx=None) -> QWidget:
     open_button.setObjectName("openFolderButton")
     open_button.setToolTip("Pick a folder and open it — it is added to your favorites automatically")
     heading_layout.addWidget(open_button)
+    scan_button = button("Scan for repositories…", "ghost")
+    scan_button.setObjectName("scanForReposButton")
+    scan_button.setToolTip("Scan a folder's subdirectories for git repositories, then add the ones you want")
+    heading_layout.addWidget(scan_button)
     add_button = button("Add repository…", "primary")
     add_button.setObjectName("addRepositoryButton")
     add_button.setToolTip("Add a repository with a name and an optional group")
@@ -119,18 +126,69 @@ def build_view(icons, ctx=None) -> QWidget:
     toolbar_layout.addWidget(refresh_button)
     landing_layout.addWidget(toolbar)
 
+    # Landing drill-down: group tiles first, then the selected group's repo
+    # cards, then (via each card's Open button) the repository's git tab.
+    landing_stack = QStackedWidget()
+    landing_stack.setObjectName("landingStack")
+
+    groups_page = QWidget()
+    groups_page.setObjectName("groupsPage")
+    groups_page_layout = QVBoxLayout(groups_page)
+    groups_page_layout.setContentsMargins(0, 0, 0, 0)
+    groups_page_layout.setSpacing(8)
+    groups_list = QListWidget()
+    groups_list.setObjectName("groupTiles")
+    groups_list.setFrameStyle(0)
+    groups_list.setViewMode(QListView.ViewMode.IconMode)
+    groups_list.setMovement(QListView.Movement.Static)
+    groups_list.setResizeMode(QListView.ResizeMode.Adjust)
+    groups_list.setSpacing(12)
+    groups_list.setUniformItemSizes(True)
+    groups_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+    groups_page_layout.addWidget(groups_list, 1)
+    groups_empty = styled_label(
+        "No repositories yet — click “Add repository…” or “Scan for repositories…” to get started.",
+        "hint",
+    )
+    groups_empty.setWordWrap(True)
+    groups_page_layout.addWidget(groups_empty)
+    landing_stack.addWidget(groups_page)
+
+    repos_page = QWidget()
+    repos_page.setObjectName("reposPage")
+    repos_page_layout = QVBoxLayout(repos_page)
+    repos_page_layout.setContentsMargins(0, 0, 0, 0)
+    repos_page_layout.setSpacing(8)
+    repos_header = QWidget()
+    repos_header_layout = QHBoxLayout(repos_header)
+    repos_header_layout.setContentsMargins(0, 0, 0, 0)
+    repos_header_layout.setSpacing(8)
+    groups_back = icon_button(icons, "chevron_left", "Back to all groups")
+    groups_back.setObjectName("groupsBackButton")
+    repos_header_layout.addWidget(groups_back)
+    repos_title = styled_label("", "muted")
+    repos_title.setObjectName("groupTitle")
+    repos_title_font = repos_title.font()
+    repos_title_font.setBold(True)
+    repos_title.setFont(repos_title_font)
+    repos_header_layout.addWidget(repos_title, 1)
+    repos_page_layout.addWidget(repos_header)
+
     favorites_list = QListWidget()
     favorites_list.setObjectName("favoritesList")
     favorites_list.setFrameStyle(0)
     favorites_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-    landing_layout.addWidget(favorites_list, 1)
+    repos_page_layout.addWidget(favorites_list, 1)
 
     empty_state = styled_label(
         "No repositories yet — click “Add repository…” to pin a folder for quick git operations.",
         "hint",
     )
     empty_state.setWordWrap(True)
-    landing_layout.addWidget(empty_state)
+    repos_page_layout.addWidget(empty_state)
+    landing_stack.addWidget(repos_page)
+
+    landing_layout.addWidget(landing_stack, 1)
 
     # ================================================================= tabs
     # Tab 0 is the landing page (never closes); every opened folder becomes
@@ -148,6 +206,9 @@ def build_view(icons, ctx=None) -> QWidget:
     # Workers for the one-click card fetch actions (retained until their
     # signals deliver — see the Worker retention contract).
     home_workers: list = []
+    # Drill-down state: None = the group-tiles page; otherwise the key of the
+    # group being viewed ("" for Ungrouped, "__demo__" in demo mode).
+    landing_state = {"group": None}
     # Last known remote status per repo path, rendered onto fresh cards after
     # a rebuild; refreshed on demand, after each fetch and on a timer.
     status_cache: dict[str, dict] = {}
@@ -223,17 +284,31 @@ def build_view(icons, ctx=None) -> QWidget:
         favorites_list.addItem(item)
         favorites_list.setItemWidget(item, widget)
 
-    def add_header(text: str, count: int) -> None:
-        """A non-selectable section header row (group name + repo count)."""
-        item = QListWidgetItem(f"{text.upper()} ({count})")
-        item.setFlags(Qt.ItemFlag.NoItemFlags)  # a label, never a target
-        font = item.font()
-        font.setBold(True)
-        font.setPointSizeF(max(9.0, font.pointSizeF() - 1.5))
-        item.setFont(font)
-        item.setForeground(QColor(colors["text2"]))
-        item.setSizeHint(QSize(0, 26))
-        favorites_list.addItem(item)
+    def add_group_tile(key: str, name: str, count: int) -> None:
+        """One clickable tile on the groups page (name + repo count)."""
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, key)
+        item.setSizeHint(QSize(190, 108))
+        tile = QPushButton()
+        tile.setCursor(Qt.CursorShape.PointingHandCursor)
+        tile.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        tile.setProperty("class", "groupTile")
+        tile_layout = QVBoxLayout(tile)
+        tile_layout.setContentsMargins(10, 8, 10, 8)
+        tile_layout.setSpacing(4)
+        icon_label = QLabel()
+        icon_label.setPixmap(icons.get("folder", 26).pixmap(26, 26))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tile_layout.addWidget(icon_label)
+        name_label = QLabel(name)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tile_layout.addWidget(name_label)
+        count_label = styled_label(f"{count} repo{'s' if count != 1 else ''}", "hint")
+        count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tile_layout.addWidget(count_label)
+        tile.clicked.connect(lambda _checked=False, k=key: open_group(k))
+        groups_list.addItem(item)
+        groups_list.setItemWidget(item, tile)
 
     def known_groups(favorites: list) -> tuple[str, ...]:
         """Distinct non-empty group names, A–Z."""
@@ -253,20 +328,18 @@ def build_view(icons, ctx=None) -> QWidget:
         group_filter.setCurrentIndex(index if index >= 0 else 0)
         group_filter.blockSignals(False)
 
-    def refresh_favorites() -> None:
-        # clear() alone would leave the old card widgets behind in the
-        # viewport (one leak per rebuild) — destroy them explicitly.
-        clear_list_widget(favorites_list)
+    def refresh_groups() -> None:
+        """Rebuild the group tiles on the landing (the groups page)."""
+        clear_list_widget(groups_list)
         search = search_edit.text().strip().lower()
-        group_filter_value = group_filter.currentData()
+        landing_stack.setCurrentWidget(groups_page)
 
         if favorites_repo is None:
-            # No database in this session — show the built-in demo folders.
-            add_header("Ungrouped", len(GIT_REPOS))
-            for name in GIT_REPOS:
-                add_card(name, name, demo=True)
-            empty_state.setText("Demo mode — no database in this session.")
-            empty_state.show()
+            # No database in this session — one demo tile.
+            add_group_tile("__demo__", "Demo folders", len(GIT_REPOS))
+            groups_empty.setText("Demo mode — no database in this session.")
+            groups_empty.show()
+            groups_list.show()
             manage_button.setEnabled(False)
             return
 
@@ -274,42 +347,107 @@ def build_view(icons, ctx=None) -> QWidget:
         _refresh_group_combo(favorites)
         manage_button.setEnabled(bool(known_groups(favorites)))
         if not favorites:
-            empty_state.setText(
-                "No repositories yet — click “Add repository…” to pin a folder "
-                "for quick git operations."
+            groups_empty.setText(
+                "No repositories yet — click “Add repository…” or “Scan for "
+                "repositories…” to get started."
             )
-            empty_state.show()
+            groups_empty.show()
+            groups_list.hide()
+            return
+        groups_list.show()
+        groups_empty.hide()
+
+        # One tile per group (Ungrouped first, then A–Z); the search text
+        # narrows the tiles by group name.
+        sections: dict[str, list] = {"": []}
+        for favorite in favorites:
+            if not search or search in (favorite.group_name or "").lower():
+                sections.setdefault((favorite.group_name or "").strip(), []).append(favorite)
+        visible = 0
+        for group in sorted(sections, key=lambda g: (g != "", g.casefold())):
+            members = sections[group]
+            if not members:
+                continue
+            visible += 1
+            add_group_tile(group, group or "Ungrouped", len(members))
+        if not visible:
+            groups_empty.setText("No repositories match your search.")
+            groups_empty.show()
+
+    def refresh_favorites() -> None:
+        """Rebuild the current landing view: group tiles, or the cards of the
+        group being drilled into (the search applies to whichever is on screen)."""
+        group = landing_state["group"]
+        if group is None:
+            refresh_groups()
             return
 
-        # Apply the search text + group filter (view-only; nothing is removed).
-        filtered = [
+        # The selected group may have vanished (e.g. deleted via Manage
+        # groups) — fall back to the tiles instead of a dead card list.
+        if group != "__demo__":
+            known = {(favorite.group_name or "").strip()
+                     for favorite in (favorites_repo.by_kind("folder") if favorites_repo is not None else ())}
+            if group not in known:
+                back_to_groups()
+                return
+
+        # clear() alone would leave the old card widgets behind in the
+        # viewport (one leak per rebuild) — destroy them explicitly.
+        clear_list_widget(favorites_list)
+        search = search_edit.text().strip().lower()
+        repos_title.setText(
+            "Demo folders" if group == "__demo__" else (group or "Ungrouped")
+        )
+
+        if group == "__demo__" or favorites_repo is None:
+            # No database in this session — show the built-in demo folders.
+            for name in GIT_REPOS:
+                add_card(name, name, demo=True)
+            empty_state.setText("Demo mode — no database in this session.")
+            empty_state.show()
+            _render_card_statuses()
+            return
+
+        favorites = favorites_repo.by_kind("folder")
+        members = [
             favorite
             for favorite in favorites
-            if (group_filter_value is None or (favorite.group_name or "").strip() == group_filter_value)
+            if (favorite.group_name or "").strip() == group
             and (
                 not search
                 or search in " ".join((favorite.label, favorite.ref, favorite.group_name or "")).lower()
             )
         ]
-        if not filtered:
-            empty_state.setText("No repositories match your search or group filter.")
+        members.sort(key=lambda f: (f.label or f.ref).casefold())
+        if not members:
+            empty_state.setText("No repositories match your search.")
             empty_state.show()
             return
         empty_state.hide()
-
-        # Group into sections; "" (ungrouped) always sorts first, then A–Z.
-        sections: dict[str, list] = {"": []}
-        for favorite in filtered:
-            sections.setdefault((favorite.group_name or "").strip(), []).append(favorite)
-        for group in sorted(sections, key=lambda g: (g != "", g.casefold())):
-            members = sorted(sections[group], key=lambda f: (f.label or f.ref).casefold())
-            if not members:
-                continue  # pre-seeded empty group ("") — nothing to show
-            add_header(group or "Ungrouped", len(members))
-            for favorite in members:
-                add_card(favorite.ref, favorite.label, demo=False)
+        for favorite in members:
+            add_card(favorite.ref, favorite.label, demo=False)
         # Fresh cards render any cached remote status immediately.
         _render_card_statuses()
+
+    def open_group(key: str) -> None:
+        """Drill into a group: show its repository cards on the repos page."""
+        landing_state["group"] = key
+        group_filter.blockSignals(True)
+        index = group_filter.findData(key)
+        group_filter.setCurrentIndex(index if index >= 0 else 0)
+        group_filter.blockSignals(False)
+        refresh_favorites()
+        landing_stack.setCurrentWidget(repos_page)
+        persist_timer.start()
+
+    def back_to_groups() -> None:
+        """Return to the group tiles (the landing's home view)."""
+        landing_state["group"] = None
+        group_filter.blockSignals(True)
+        group_filter.setCurrentIndex(0)  # "All groups"
+        group_filter.blockSignals(False)
+        refresh_groups()
+        persist_timer.start()
 
     def add_repository() -> None:
         """Open the Add dialog; persist the returned favorite on accept."""
@@ -907,7 +1045,7 @@ def build_view(icons, ctx=None) -> QWidget:
             ]
             active = tabs.currentWidget().property("repoPath") if tabs.currentIndex() > 0 else ""
             service.set("git.home.search", search_edit.text().strip())
-            service.set("git.home.group", group_filter.currentData() or "")
+            service.set("git.home.group", landing_state["group"] or "")
             service.set("git.home.tabs", json.dumps(open_paths))
             service.set("git.home.active", active)
         except Exception:  # noqa: BLE001 — persistence must never break the UI
@@ -965,17 +1103,47 @@ def build_view(icons, ctx=None) -> QWidget:
         if chosen:
             open_folder(chosen)
 
+    def scan_for_repos() -> None:
+        """Scan a folder for nested git repositories; add the chosen ones."""
+        if favorites_repo is None:
+            return
+        dialog = ScanReposDialog(
+            root,
+            favorites_repo,
+            existing_groups=known_groups(favorites_repo.by_kind("folder")),
+            executable=git_exe(),
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            for favorite in dialog.added:
+                persist_new(favorite)  # deduped insert + recent-folders history
+            refresh_favorites()
+
     def _on_filter_changed() -> None:
         refresh_favorites()
-        persist_timer.start()  # debounce while typing / scrolling the combo
+        persist_timer.start()  # debounce while typing in the search field
+
+    def _on_group_filter_changed() -> None:
+        """The group combo drives the drill-down: picking a group opens it,
+        "All groups" returns to the tiles page."""
+        value = group_filter.currentData()
+        if value is None:
+            back_to_groups()
+        else:
+            open_group(value)
+        persist_timer.start()
 
     open_button.clicked.connect(choose_folder)
+    scan_button.clicked.connect(scan_for_repos)
     add_button.clicked.connect(add_repository)
     search_edit.textChanged.connect(lambda _text: _on_filter_changed())
-    group_filter.currentIndexChanged.connect(lambda _index: _on_filter_changed())
+    group_filter.currentIndexChanged.connect(lambda _index: _on_group_filter_changed())
     manage_button.clicked.connect(manage_groups)
     refresh_button.clicked.connect(refresh_favorites)
     favorites_list.customContextMenuRequested.connect(show_card_menu)
+    groups_list.itemClicked.connect(
+        lambda item: open_group(item.data(Qt.ItemDataRole.UserRole))
+    )
+    groups_back.clicked.connect(back_to_groups)
     tabs.tabCloseRequested.connect(close_tab)
     tabs.currentChanged.connect(lambda _index: _persist_view_state())
 

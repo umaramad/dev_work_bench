@@ -92,7 +92,7 @@ class ConfigLoader:
     # -- persistence -----------------------------------------------------------------------
 
     def save(self, path: str | Path, data: dict[str, Any] | None = None) -> None:
-        """Write configuration as TOML (falls back to JSON if unavailable)."""
+        """Write configuration as TOML."""
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = data if data is not None else self._data
@@ -132,6 +132,8 @@ def _dict_to_toml(data: dict[str, Any], indent: int = 0) -> str:
     lines: list[str] = []
     pad = " " * indent
     for key, value in data.items():
+        if value is None:
+            continue  # TOML has no null; an omitted key falls back to its default on load
         if isinstance(value, dict):
             lines.append(f"{pad}[{key}]")
             lines.append(_dict_to_toml(value, indent + 2))

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from devworkbench.models.persistence import Favorite
 from devworkbench.ui.widgets.common import button, form_row, styled_label
+from devworkbench.workers.git_worker import GitWorker
 
 
 class RepoDialog(QDialog):
@@ -504,3 +505,227 @@ class GroupManagerDialog(QDialog):
         self._hide_editor()
         self._reload_groups()
         self._set_hint(f"Moved “{group}” to Ungrouped.")
+
+
+class ScanReposDialog(QDialog):
+    """Scan a folder for nested git repositories and add the chosen ones.
+
+    Picks a root folder, runs the ``find_repos`` git operation off the UI
+    thread, then lists every discovered repository with a checkbox. Select
+    one or several, pick a group (an existing one or a freshly typed name)
+    and click "Add selected" — already-favorited paths are marked and
+    skipped. ``added`` holds the favorites created by the last "Add" so the
+    caller can refresh its lists and history.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        favorites_repo=None,
+        existing_groups: tuple[str, ...] = (),
+        executable: str = "git",
+    ) -> None:
+        super().__init__(parent)
+        self._repo = favorites_repo
+        self._executable = executable
+        self._existing_paths = {
+            favorite.ref for favorite in (favorites_repo.by_kind("folder") if favorites_repo is not None else ())
+        }
+        # Retained until their signals deliver (Worker retention contract).
+        self._workers: list = []
+        self.added: list[Favorite] = []
+        self.setWindowTitle("Scan for repositories")
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(460)
+        self._build(existing_groups)
+
+    # -- construction -------------------------------------------------------
+
+    def _build(self, existing_groups: tuple[str, ...]) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Scan a folder for git repositories in its subdirectories, then "
+            "add the ones you want to a group."
+        )
+        intro.setObjectName("hint")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        # Root folder row.
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText("/Users/me/Projects/workspace")
+        browse = QPushButton("Browse…")
+        browse.setProperty("class", "ghost")
+        browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse.clicked.connect(self._browse)
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+        controls_layout.addWidget(self.path_edit, 1)
+        controls_layout.addWidget(browse)
+        layout.addWidget(form_row("Folder to scan", controls, "Git repositories are searched in its subdirectories."))
+
+        scan_row = QHBoxLayout()
+        scan_row.setSpacing(6)
+        self.scan_button = button("Scan", "primary")
+        self.scan_button.setObjectName("scanButton")
+        self.scan_button.clicked.connect(self._scan)
+        self.scan_status = styled_label("", "hint")
+        self.scan_status.setObjectName("scanStatus")
+        scan_row.addWidget(self.scan_button)
+        scan_row.addWidget(self.scan_status, 1)
+        layout.addLayout(scan_row)
+
+        self.results_list = QListWidget()
+        self.results_list.setObjectName("scanResults")
+        self.results_list.setFrameStyle(0)
+        layout.addWidget(self.results_list, 1)
+
+        select_row = QHBoxLayout()
+        select_row.setSpacing(6)
+        select_all = button("Select all", "ghost")
+        select_all.clicked.connect(lambda: self._set_all_checked(True))
+        select_none = button("Select none", "ghost")
+        select_none.clicked.connect(lambda: self._set_all_checked(False))
+        select_row.addWidget(select_all)
+        select_row.addWidget(select_none)
+        select_row.addStretch(1)
+        layout.addLayout(select_row)
+
+        self.group_combo = QComboBox()
+        self.group_combo.setEditable(True)
+        self.group_combo.addItem("")  # empty selection = ungrouped
+        for group in existing_groups:
+            self.group_combo.addItem(group)
+        self.group_combo.lineEdit().setPlaceholderText("Ungrouped — or type a new group")
+        layout.addWidget(form_row(
+            "Add to group",
+            self.group_combo,
+            "e.g. Work, Personal, Open Source. Leave empty for no group.",
+        ))
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setProperty("class", "ghost")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        self.add_button = button("Add selected", "primary")
+        self.add_button.setObjectName("addSelectedButton")
+        self.add_button.setEnabled(False)
+        self.add_button.clicked.connect(self._add_selected)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.add_button)
+        layout.addLayout(buttons)
+
+    # -- scanning ------------------------------------------------------------------
+
+    def _browse(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Choose folder to scan",
+            self.path_edit.text().strip() or os.path.expanduser("~"),
+        )
+        if chosen:
+            self.path_edit.setText(chosen)
+
+    def _scan(self) -> None:
+        """Kick off the (async) find_repos scan for the entered folder."""
+        path = self.path_edit.text().strip()
+        if not path or not os.path.isdir(os.path.abspath(os.path.expanduser(path))):
+            self.scan_status.setText("Choose a folder that exists first.")
+            return
+        self.results_list.clear()
+        self.add_button.setEnabled(False)
+        self.scan_button.setEnabled(False)
+        self.scan_status.setText("Scanning subdirectories…")
+
+        worker = GitWorker("find_repos", os.path.abspath(os.path.expanduser(path)), executable=self._executable)
+        self._workers.append(worker)
+
+        def done(result, current=worker) -> None:
+            if current in self._workers:
+                self._workers.remove(current)
+            self.scan_button.setEnabled(True)
+            repos = result.get("repos") or []
+            self.show_results(repos)
+
+        def failed(exc, current=worker) -> None:
+            if current in self._workers:
+                self._workers.remove(current)
+            self.scan_button.setEnabled(True)
+            self.scan_status.setText(f"Scan failed: {exc}")
+
+        worker.signals.finished.connect(done)
+        worker.signals.error.connect(failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def show_results(self, repos: list[str]) -> None:
+        """Populate the results list from a scan (also used by tests)."""
+        self.results_list.clear()
+        if not repos:
+            self.scan_status.setText("No git repositories found under this folder.")
+            return
+        for path in sorted(repos):
+            name = os.path.basename(path.rstrip("/")) or path
+            existing = path in self._existing_paths
+            item = QListWidgetItem(f"{name}  ·  {path}")
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            if existing:
+                item.setCheckState(Qt.CheckState.Unchecked)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)  # greyed out
+                item.setToolTip("Already in your favorites")
+            else:
+                item.setCheckState(Qt.CheckState.Checked)  # pre-selected by default
+            self.results_list.addItem(item)
+        self.scan_status.setText(f"Found {len(repos)} git repositories — check the ones to add.")
+        self.add_button.setEnabled(True)
+
+    # -- adding ----------------------------------------------------------------------
+
+    def selected_paths(self) -> list[str]:
+        """Full paths of the checked, enabled results."""
+        selected: list[str] = []
+        for i in range(self.results_list.count()):
+            item = self.results_list.item(i)
+            if not (item.flags() & Qt.ItemFlag.ItemIsEnabled):
+                continue
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            path = item.data(Qt.ItemDataRole.UserRole)
+            if path:
+                selected.append(path)
+        return selected
+
+    def _set_all_checked(self, checked: bool) -> None:
+        for i in range(self.results_list.count()):
+            item = self.results_list.item(i)
+            if item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+
+    def _add_selected(self) -> None:
+        """Insert the checked repositories as favorites; closes on success."""
+        group = self.group_combo.currentText().strip()
+        added: list[Favorite] = []
+        for path in self.selected_paths():
+            if path in self._existing_paths:
+                continue
+            favorite = Favorite(
+                kind="folder",
+                ref=os.path.abspath(path),
+                label=os.path.basename(path.rstrip("/")) or path,
+                group_name=group,
+            )
+            if self._repo is not None:
+                self._repo.insert(favorite)
+            self._existing_paths.add(path)
+            added.append(favorite)
+        self.added = added
+        if added or self._repo is None:
+            self.accept()

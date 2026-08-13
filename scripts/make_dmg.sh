@@ -47,6 +47,16 @@ hdiutil create -srcfolder "$STAGING" -volname "DevWorkbench" \
 
 # 2) Mount, arrange the window layout (best-effort), then detach.
 hdiutil attach "$STAGING_IMAGE" -mountpoint "$MOUNT_POINT" -nobrowse -readwrite >/dev/null
+
+# Stamp the volume with the app logo so the mounted DMG shows it in Finder
+# (best-effort: the custom-icon bit needs the Xcode SetFile tool).
+ICON="resources/icons/DevWorkbench.icns"
+if [[ -f "$ICON" ]]; then
+    cp "$ICON" "$MOUNT_POINT/.VolumeIcon.icns"
+    SetFile -a C "$MOUNT_POINT" 2>/dev/null || true
+    echo "   (volume icon stamped)"
+fi
+
 if osascript <<'APPLESCRIPT' >/dev/null 2>&1; then
     tell application "Finder"
         tell disk "DevWorkbench"
