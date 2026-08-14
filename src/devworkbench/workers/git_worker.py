@@ -15,6 +15,7 @@ Operations:
     find_repos  — every git repo nested under ``path`` (workspaces)
     fetch_all   — run fetch in each nested repo (progress per repo)
     remote_status — branch + ahead/behind vs the upstream (local-only)
+    reset       — ``git reset`` (soft; ``hard=True`` → ``--hard``)
 
 Signals contract: construct on the UI thread and retain until finished/error
 (see ``workers/base.py``).
@@ -45,6 +46,7 @@ _TIME_OUTPUT = {  # seconds per operation class
     "find_repos": 30,
     "fetch_all": 120,
     "remote_status": 30,
+    "reset": 60,
 }
 
 
@@ -90,6 +92,9 @@ class GitWorker(Worker):
             return self._fetch_all()
         if op == "remote_status":
             return self._remote_status()
+        if op == "reset":
+            hard = bool(self._args and self._args[0] == "hard")
+            return self._git(("reset", "--hard") if hard else ("reset",))
         raise ValueError(f"unknown git operation {op!r}")
 
     # -- operations ---------------------------------------------------------------

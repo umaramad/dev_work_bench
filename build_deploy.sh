@@ -2,11 +2,12 @@
 # DevWorkbench — build & deploy menu.
 #
 #   ./build_deploy.sh              # interactive menu
-#   ./build_deploy.sh local        # run the Flet UI from source (dev mode)
+#   ./build_deploy.sh local        # run the PySide6 UI from source (dev mode)
+#   ./build_deploy.sh flet         # run the Flet UI from source (needs Python 3.10+)
 #   ./build_deploy.sh build        # build release Flet .app only
 #   ./build_deploy.sh dmg          # build release Flet .app + portable .dmg
 #   ./build_deploy.sh debug        # build debug Flet .app (console visible)
-#   ./build_deploy.sh qt           # build legacy PySide6 .app (not used for DMG)
+#   ./build_deploy.sh qt           # build PySide6 .app (not used for DMG)
 #   ./build_deploy.sh tests        # run the test suite
 #   ./build_deploy.sh bump [patch|minor|major]   # bump version
 #   ./build_deploy.sh version      # print current version
@@ -14,7 +15,7 @@
 #   ./build_deploy.sh doctor       # check prerequisites
 #
 # With no argument the script prompts for an option — choose "1. Run locally"
-# to start the Flet UI from source, or "3. Build + portable DMG" to produce
+# to start the PySide6 UI from source, or "3. Build + portable DMG" to produce
 # dist/DevWorkbench-<version>.dmg ready to distribute.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -52,6 +53,10 @@ require_pyinstaller() {
     "$PYTHON" -c "import PyInstaller" 2>/dev/null || die "PyInstaller missing — run: .venv/bin/python -m pip install -r requirements.txt"
 }
 
+require_pyside() {
+    "$PYTHON" -c "import PySide6" 2>/dev/null || die "PySide6 missing — run: .venv/bin/python -m pip install -r requirements.txt"
+}
+
 require_flet() {
     "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
         || die "Flet UI needs Python 3.10+ (venv is $($PYTHON -V 2>&1)). Recreate with: /opt/homebrew/bin/python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e '.[flet]'"
@@ -60,6 +65,14 @@ require_flet() {
 
 # --- actions ----------------------------------------------------------------
 run_local() {
+    require_venv; require_pyside
+    ok "running DevWorkbench PySide6 UI from source (Ctrl-C to quit)"
+    # src layout: package lives under src/ (editable install not required).
+    export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
+    exec "$PYTHON" -m devworkbench
+}
+
+run_flet() {
     require_venv; require_flet
     ok "running DevWorkbench Flet UI from source (Ctrl-C to quit)"
     exec "$PYTHON" main.py
@@ -81,7 +94,7 @@ build_debug() {
 
 build_qt() {
     require_venv; require_pyinstaller
-    ok "building legacy PySide6 .app v$VERSION"
+    ok "building PySide6 .app v$VERSION"
     scripts/build.sh qt
     ok "done: dist/DevWorkbench.app  (PySide6 UI — not used for DMG)"
 }
@@ -93,7 +106,7 @@ build_dmg() {
     scripts/make_dmg.sh
     ok "done: dist/DevWorkbench-$VERSION.dmg  (drag into /Applications)"
     note "verify: hdiutil verify dist/DevWorkbench-$VERSION.dmg"
-    note "the .app inside launches the Flet UI (same as ./build_deploy.sh local)"
+    note "the .app inside launches the Flet UI; local run uses PySide6 (./build_deploy.sh local)"
 }
 
 run_tests() {
@@ -127,9 +140,9 @@ doctor() {
     require_venv
     echo "${C_BOLD}prerequisites:${C_RESET}"
     note "  python : $($PYTHON --version 2>&1)"
-    if "$PYTHON" -c "import flet" 2>/dev/null; then note "  Flet: present"; else note "  Flet: ${C_RED}missing${C_RESET} (needed for local run + DMG)"; fi
-    if [[ -x .venv/bin/flet ]]; then note "  flet CLI: present"; else note "  flet CLI: ${C_RED}missing${C_RESET}"; fi
-    if "$PYTHON" -c "import PySide6" 2>/dev/null; then note "  PySide6: present (optional / legacy)"; else note "  PySide6: absent"; fi
+    if "$PYTHON" -c "import PySide6" 2>/dev/null; then note "  PySide6: present (local run)"; else note "  PySide6: ${C_RED}missing${C_RESET} (needed for ./build_deploy.sh local)"; fi
+    if "$PYTHON" -c "import flet" 2>/dev/null; then note "  Flet: present (optional — ./build_deploy.sh flet / DMG)"; else note "  Flet: absent (optional — needs Python 3.10+)"; fi
+    if [[ -x .venv/bin/flet ]]; then note "  flet CLI: present"; else note "  flet CLI: absent"; fi
     if "$PYTHON" -c "import PyInstaller" 2>/dev/null; then note "  PyInstaller: present"; else note "  PyInstaller: ${C_RED}missing${C_RESET} (needed for build/dmg)"; fi
     echo
     ok "done"
@@ -139,7 +152,7 @@ doctor() {
 menu() {
     banner
     echo "${C_BOLD}Choose an option:${C_RESET}"
-    echo "  ${C_CYN}1${C_RESET}) Run locally — Flet UI (from source)"
+    echo "  ${C_CYN}1${C_RESET}) Run locally — PySide6 UI (from source)"
     echo "  ${C_CYN}2${C_RESET}) Build release Flet .app"
     echo "  ${C_CYN}3${C_RESET}) Build release Flet .app + portable DMG"
     echo "  ${C_CYN}4${C_RESET}) Build debug Flet .app (console visible)"
@@ -148,9 +161,10 @@ menu() {
     echo "  ${C_CYN}7${C_RESET}) Version bump helper — pick patch/minor/major"
     echo "  ${C_CYN}8${C_RESET}) Clean build artifacts (dist/ build/)"
     echo "  ${C_CYN}9${C_RESET}) Doctor — check prerequisites"
+    echo "  ${C_CYN}F${C_RESET}) Run Flet UI locally (Python 3.10+)"
     echo "  ${C_CYN}0${C_RESET}) Quit"
     echo
-    read -r -p "Select [1-9, 0]: " choice || { echo; ok "bye"; exit 0; }
+    read -r -p "Select [1-9, F, 0]: " choice || { echo; ok "bye"; exit 0; }
     while true; do
         case "$choice" in
             1) run_local ;;  # execs — terminates the script by design
@@ -165,6 +179,7 @@ menu() {
                 ;;
             8) clean_all ;;
             9) doctor ;;
+            [Ff]) run_flet ;;  # execs — terminates the script by design
             0) ok "bye"; exit 0 ;;
             *) die "invalid choice '$choice'" ;;
         esac
@@ -172,13 +187,14 @@ menu() {
         # build; refresh the version stamp in case it was bumped above.
         VERSION=$("$PYTHON" scripts/version.py 2>/dev/null || echo "?")
         echo
-        read -r -p "Anything else? [1-9, 0 to quit]: " choice || { echo; ok "bye"; exit 0; }
+        read -r -p "Anything else? [1-9, F, 0 to quit]: " choice || { echo; ok "bye"; exit 0; }
     done
 }
 
 # --- dispatch ----------------------------------------------------------------
 case "$ACTION" in
     local|run|dev)   run_local ;;
+    flet|flet-local) run_flet ;;
     build|app)       build_release ;;
     dmg|deploy)      build_dmg ;;
     debug)           build_debug ;;
