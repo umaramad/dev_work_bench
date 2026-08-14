@@ -471,7 +471,7 @@ class AppearancePage(SettingsPage):
     page_id = "appearance"
     title = "Appearance"
     icon = "sun"
-    subtitle = "Theme, accent color and typography"
+    subtitle = "Theme, workspace panels, accent color and typography"
     groups = (
         ("Theme", ("appearance.theme", "appearance.accent", "appearance.reduce_transparency")),
         ("Typography", ("appearance.font_size", "appearance.mono_diffs", "appearance.antialias")),
@@ -483,6 +483,49 @@ class AppearancePage(SettingsPage):
         if spec.key == "appearance.font_size":
             return _FontSizeRow()
         return super()._make_control(spec)
+
+    def _build_extra(self, layout: QVBoxLayout) -> None:
+        """Workspace chrome moved here from the old top toolbar."""
+        box = QGroupBox("Workspace")
+        group_layout = QVBoxLayout(box)
+        group_layout.setContentsMargins(12, 14, 12, 12)
+        group_layout.setSpacing(10)
+
+        hint = QLabel(
+            "Panels and tools that used to sit on the top toolbar. "
+            "Shortcuts still work from the View / Edit menus and the command palette."
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        group_layout.addWidget(hint)
+
+        panels = QWidget()
+        panels_layout = QHBoxLayout(panels)
+        panels_layout.setContentsMargins(0, 0, 0, 0)
+        panels_layout.setSpacing(8)
+        for label, action_key, icon_key in (
+            ("Command Palette", "open_palette", "search"),
+            ("Navigator", "toggle_navigator", "eye"),
+            ("Output", "toggle_output", "terminal"),
+            ("Details", "toggle_details", "info"),
+            ("Toggle Theme", "toggle_theme", "moon"),
+        ):
+            btn = QPushButton(self._icons.get(icon_key, 16), label)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setProperty("class", "ghost")
+            btn.clicked.connect(lambda _checked=False, key=action_key: self._run_shell_action(key))
+            panels_layout.addWidget(btn)
+        panels_layout.addStretch(1)
+        group_layout.addWidget(panels)
+        layout.insertWidget(0, box)
+
+    def _run_shell_action(self, key: str) -> None:
+        if self._ctx is None or not self._ctx.has("shell.actions"):
+            return
+        actions = self._ctx.resolve("shell.actions")
+        slot = actions.get(key) if isinstance(actions, dict) else None
+        if callable(slot):
+            slot()
 
 
 class GitPage(SettingsPage):

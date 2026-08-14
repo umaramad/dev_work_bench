@@ -1,12 +1,15 @@
 """MainWindow — the application shell.
 
 Layout
-    menubar + toolbar (top)
-    ├─ Navigator dock   (left, pinned)   — module sidebar
+    menubar (top)
+    ├─ Sidebar dock     (left, pinned)    — module rail (Compare / Git / …)
     ├─ Navigator dock   (left, floatable) — contextual tree
     ├─ Output dock      (bottom)          — Terminal / Command Log / Tasks
     ├─ Details dock     (right, hidden)   — inspector
-    └─ workspace        (center)          — module tabs
+    └─ workspace        (center)          — module stack (tab bar hidden)
+
+Shell chrome formerly on the top toolbar (theme, docks, command palette)
+lives under Settings → Appearance → Workspace.
 
 All panel visibility is toggleable from the View menu / command palette.
 """
@@ -24,7 +27,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QTabWidget,
-    QToolBar,
     QWidget,
 )
 
@@ -80,6 +82,9 @@ class MainWindow(QMainWindow):
         self.workspace.setObjectName("workspaceTabs")
         self.workspace.setDocumentMode(True)
         self.workspace.setMovable(False)
+        # Module switching lives in the left sidebar (and menus / shortcuts).
+        # Hide the duplicate top tab strip so content gets the vertical space.
+        self.workspace.tabBar().hide()
         self.setCentralWidget(self.workspace)
 
         self._build_sidebar()
@@ -89,7 +94,8 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_status_bar()
         self._build_menus()
-        self._build_toolbar()
+        self._build_task_actions()
+        self._register_shell_actions()
 
         # Lazily-built module views (see _build_tabs): index -> built widget.
         self._built_views: dict[int, QWidget] = {}
@@ -257,37 +263,29 @@ class MainWindow(QMainWindow):
         self._menus["help"] = help_menu
         help_menu.addAction(self._action("About " + APP_NAME, "app", self._show_about))
 
-    # ---------------------------------------------------------------- toolbar
+    # ---------------------------------------------------------- task actions
 
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setObjectName("mainToolbar")
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
-
-        # Toolbar actions kept out of the toolbar for now (product request):
-        # Open / Refresh / Run / Stop are not wired to real behavior yet. The
-        # Run/Stop actions stay alive so the worker plumbing and tests keep
-        # working; re-enable by adding the actions below back to the toolbar.
-        # toolbar.addAction(self._action("Open…", "open", self._not_wired))
-        # toolbar.addAction(self._action("Refresh", "refresh", self._not_wired))
-        # toolbar.addSeparator()
+    def _build_task_actions(self) -> None:
+        """Keep Run/Stop actions for Output dock workers — no top toolbar."""
         self._run_action = self._action("Run", "play", self._run_task)
         self._stop_action = self._action("Stop", "stop", self._stop_task, enabled=False)
         self._run_worker = None
         self._task_row: int | None = None
-        # toolbar.addAction(self._run_action)
-        # toolbar.addAction(self._stop_action)
-        # toolbar.addSeparator()
-        toolbar.addAction(self._action("Command Palette", "search", self._open_palette))
-        toolbar.addSeparator()
-        toolbar.addAction(self._dock_actions["nav"])
-        toolbar.addAction(self._dock_actions["out"])
-        toolbar.addAction(self._dock_actions["det"])
-        toolbar.addSeparator()
-        self._toolbar_theme_action = self._action("Toggle Theme", "moon", self._toggle_theme)
-        toolbar.addAction(self._toolbar_theme_action)
+
+    def _register_shell_actions(self) -> None:
+        """Expose palette / docks / theme to Settings → Appearance → Workspace."""
+        if self._ctx is None:
+            return
+        self._ctx.container.register_singleton(
+            "shell.actions",
+            {
+                "open_palette": self._open_palette,
+                "toggle_theme": self._toggle_theme,
+                "toggle_navigator": self._dock_actions["nav"].trigger,
+                "toggle_output": self._dock_actions["out"].trigger,
+                "toggle_details": self._dock_actions["det"].trigger,
+            },
+        )
 
     # ---------------------------------------------------------------- actions
 
@@ -405,8 +403,6 @@ class MainWindow(QMainWindow):
         if name not in THEMES:
             name = "dark"
         self.theme.apply(name)
-        icon = "moon" if name == "dark" else "sun"
-        self._toolbar_theme_action.setIcon(self._icons.get(icon, 16))
         # Re-tint every action and tab icon for the new theme (icons are
         # cached per resolved color, so fresh hex values yield fresh pixmaps).
         for action in self.findChildren(QAction):
