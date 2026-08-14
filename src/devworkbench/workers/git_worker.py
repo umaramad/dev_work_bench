@@ -16,6 +16,8 @@ Operations:
     fetch_all   — run fetch in each nested repo (progress per repo)
     remote_status — branch + ahead/behind vs the upstream (local-only)
     reset       — ``git reset`` (soft; ``hard=True`` → ``--hard``)
+    has_branch  — does local ``refs/heads/<name>`` exist? (name in args[0])
+    checkout    — ``git checkout <name>`` (name in args[0])
 
 Signals contract: construct on the UI thread and retain until finished/error
 (see ``workers/base.py``).
@@ -47,6 +49,8 @@ _TIME_OUTPUT = {  # seconds per operation class
     "fetch_all": 120,
     "remote_status": 30,
     "reset": 60,
+    "has_branch": 15,
+    "checkout": 30,
 }
 
 
@@ -95,6 +99,17 @@ class GitWorker(Worker):
         if op == "reset":
             hard = bool(self._args and self._args[0] == "hard")
             return self._git(("reset", "--hard") if hard else ("reset",))
+        if op == "has_branch":
+            name = (self._args[0] if self._args else "").strip()
+            if not name:
+                return {"ok": False, "exists": False, "output": "branch name required"}
+            result = self._git(("show-ref", "--verify", "--quiet", f"refs/heads/{name}"))
+            return {"ok": True, "exists": bool(result["ok"]), "output": result["output"]}
+        if op == "checkout":
+            name = (self._args[0] if self._args else "").strip()
+            if not name:
+                return {"ok": False, "output": "branch name required"}
+            return self._git(("checkout", name))
         raise ValueError(f"unknown git operation {op!r}")
 
     # -- operations ---------------------------------------------------------------

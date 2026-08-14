@@ -18,7 +18,9 @@ import os
 from PySide6.QtCore import QSize, QThreadPool, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -152,6 +154,28 @@ def build_view(icons, ctx=None) -> QWidget:
     repos_title.setFont(repos_title_font)
     repos_pane_layout.addWidget(repos_title)
 
+    # Shared branch list (common for all repos) + checkout/fetch for the group.
+    branch_bar = QWidget()
+    branch_bar.setObjectName("branchBar")
+    branch_layout = QHBoxLayout(branch_bar)
+    branch_layout.setContentsMargins(0, 0, 0, 0)
+    branch_layout.setSpacing(6)
+    branch_layout.addWidget(styled_label("Branch", "hint"))
+    branch_combo = QComboBox()
+    branch_combo.setObjectName("branchCombo")
+    branch_combo.setMinimumWidth(160)
+    branch_combo.setToolTip("Shared branch list — used for Fetch branch across this group")
+    branch_layout.addWidget(branch_combo, 1)
+    branch_fetch = button("Fetch branch", "primary")
+    branch_fetch.setObjectName("branchFetchButton")
+    branch_fetch.setToolTip("Checkout this branch in each repo (skip if missing), then fetch")
+    branch_layout.addWidget(branch_fetch)
+    branch_edit = button("Edit branches…", "ghost")
+    branch_edit.setObjectName("branchEditButton")
+    branch_edit.setToolTip("Configure the shared list of branch names")
+    branch_layout.addWidget(branch_edit)
+    repos_pane_layout.addWidget(branch_bar)
+
     bulk_bar = QWidget()
     bulk_bar.setObjectName("bulkBar")
     bulk_layout = QHBoxLayout(bulk_bar)
@@ -275,7 +299,7 @@ def build_view(icons, ctx=None) -> QWidget:
         name = QLabel(label or os.path.basename(path.rstrip("/")) or path)
         name_font = name.font()
         name_font.setBold(True)
-        name_font.setPointSize(max(name_font.pointSize(), 13))
+        name_font.setPointSize(max(name_font.pointSize() + 2, 15))
         name.setFont(name_font)
         name.setWordWrap(False)
         labels.addWidget(name)
@@ -285,6 +309,9 @@ def build_view(icons, ctx=None) -> QWidget:
         path_text.setToolTip(path)
         path_text.setWordWrap(False)
         path_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        path_font = path_text.font()
+        path_font.setPointSize(max(path_font.pointSize() + 1, 12))
+        path_text.setFont(path_font)
         # Single-line elided path — full path stays in the tooltip.
         metrics = path_text.fontMetrics()
         path_text.setText(metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, 420))
@@ -297,7 +324,10 @@ def build_view(icons, ctx=None) -> QWidget:
         remote_pill.setProperty("role", "cardRemoteStatus")
         remote_pill.setProperty("state", "")
         remote_pill.setWordWrap(False)
-        remote_pill.setMinimumHeight(22)
+        remote_pill.setMinimumHeight(24)
+        pill_font = remote_pill.font()
+        pill_font.setPointSize(max(pill_font.pointSize() + 1, 12))
+        remote_pill.setFont(pill_font)
         remote_pill.hide()
         labels.addWidget(remote_pill, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -305,6 +335,9 @@ def build_view(icons, ctx=None) -> QWidget:
         status_label = styled_label("", "hint")
         status_label.setProperty("role", "cardStatus")
         status_label.setWordWrap(False)
+        status_font = status_label.font()
+        status_font.setPointSize(max(status_font.pointSize() + 1, 12))
+        status_label.setFont(status_font)
         status_label.setMinimumHeight(metrics.height() + 2)
         status_label.hide()
         labels.addWidget(status_label)
@@ -445,6 +478,9 @@ def build_view(icons, ctx=None) -> QWidget:
         bulk_fetch.setEnabled(enabled)
         bulk_status.setEnabled(enabled)
         bulk_reset.setEnabled(enabled)
+        branch_fetch.setEnabled(enabled and bool(branch_combo.currentText().strip()))
+        branch_combo.setEnabled(not landing_state["bulk_busy"])
+        branch_edit.setEnabled(not landing_state["bulk_busy"])
         if landing_state["bulk_busy"]:
             bulk_busy_label.setText("Running…")
             bulk_busy_label.show()
@@ -849,6 +885,225 @@ def build_view(icons, ctx=None) -> QWidget:
                         return
         except RuntimeError:
             pass
+
+    _DEFAULT_BRANCHES = ("main", "master", "develop")
+
+    def _load_branch_names() -> list[str]:
+        raw = '["main","master","develop"]'
+        if service is not None:
+            try:
+                raw = str(service.get("git.home.branches") or raw)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            data = []
+        names: list[str] = []
+        if isinstance(data, list):
+            for item in data:
+                name = str(item).strip()
+                if name and name not in names:
+                    names.append(name)
+        return names or list(_DEFAULT_BRANCHES)
+
+    def _save_branch_names(names: list[str]) -> None:
+        if service is None:
+            return
+        try:
+            service.set("git.home.branches", json.dumps(names))
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to save git.home.branches")
+
+    def _refresh_branch_combo(prefer: str | None = None) -> None:
+        names = _load_branch_names()
+        current = prefer if prefer is not None else branch_combo.currentText().strip()
+        if service is not None and not current:
+            try:
+                current = str(service.get("git.home.branch") or "")
+            except Exception:  # noqa: BLE001
+                current = ""
+        branch_combo.blockSignals(True)
+        branch_combo.clear()
+        for name in names:
+            branch_combo.addItem(name)
+        index = branch_combo.findText(current)
+        branch_combo.setCurrentIndex(index if index >= 0 else 0)
+        branch_combo.blockSignals(False)
+
+    def _edit_branches_dialog() -> None:
+        dialog = QDialog(root)
+        dialog.setWindowTitle("Edit shared branches")
+        dialog.setModal(True)
+        layout_d = QVBoxLayout(dialog)
+        layout_d.addWidget(
+            styled_label("One branch name per line (shared across all repositories).", "hint")
+        )
+        editor = QPlainTextEdit()
+        editor.setPlainText("\n".join(_load_branch_names()))
+        editor.setMinimumSize(360, 200)
+        layout_d.addWidget(editor)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        layout_d.addWidget(buttons)
+
+        def save() -> None:
+            names: list[str] = []
+            for line in editor.toPlainText().splitlines():
+                name = line.strip()
+                if name and name not in names:
+                    names.append(name)
+            if not names:
+                names = list(_DEFAULT_BRANCHES)
+            _save_branch_names(names)
+            selected = branch_combo.currentText().strip()
+            _refresh_branch_combo(prefer=selected if selected in names else names[0])
+            persist_timer.start()
+            dialog.accept()
+
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(dialog.reject)
+        dialog.exec()
+
+    def run_branch_fetch() -> None:
+        """Checkout the selected branch (skip if missing), then fetch — per group repo."""
+        if landing_state["bulk_busy"]:
+            return
+        branch = branch_combo.currentText().strip()
+        if not branch:
+            return
+        group = landing_state["group"]
+        if group in (None, "__demo__"):
+            return
+        members = favorites_for_group()
+        if not members:
+            return
+        paths = [favorite.ref for favorite in members]
+        landing_state["bulk_busy"] = True
+        bulk_queue[:] = list(paths)
+        bulk_meta.update({
+            "op": "branch_fetch",
+            "branch": branch,
+            "done": 0,
+            "total": len(paths),
+            "ok": 0,
+            "skipped": 0,
+        })
+        _set_bulk_enabled(False)
+        console_append(
+            f"$ checkout+fetch {branch} — {len(paths)} repos in {group or 'Ungrouped'}"
+        )
+        set_console_status(f"branch 0/{len(paths)}…")
+        _run_next_branch_fetch()
+
+    def _run_next_branch_fetch() -> None:
+        if not bulk_queue:
+            _finish_branch_fetch()
+            return
+        branch = str(bulk_meta.get("branch") or "")
+        path = bulk_queue.pop(0)
+        bulk_meta["done"] += 1
+        set_console_status(f"branch {bulk_meta['done']}/{bulk_meta['total']}…")
+        console_append(f"$ has_branch {branch} — {path}")
+        _set_card_op_status(path, f"Checking {branch}…")
+
+        worker = GitWorker("has_branch", path, args=(branch,), executable=git_exe())
+        bulk_workers.append(worker)
+
+        def after_has(result, current=worker, p=path, b=branch) -> None:
+            if current in bulk_workers:
+                bulk_workers.remove(current)
+            exists = bool(isinstance(result, dict) and result.get("exists"))
+            if not exists:
+                bulk_meta["skipped"] = int(bulk_meta.get("skipped") or 0) + 1
+                console_append(f"  · skip — no local branch {b}", ok=None)
+                _set_card_op_status(p, f"Skipped — no {b}", ok=False)
+                _run_next_branch_fetch()
+                return
+            console_append(f"$ git checkout {b} — {p}")
+            _set_card_op_status(p, f"Checkout {b}…")
+            checkout = GitWorker("checkout", p, args=(b,), executable=git_exe())
+            bulk_workers.append(checkout)
+
+            def after_checkout(cres, cworker=checkout, cp=p, cb=b) -> None:
+                if cworker in bulk_workers:
+                    bulk_workers.remove(cworker)
+                cok = bool(isinstance(cres, dict) and cres.get("ok"))
+                cout = str((cres or {}).get("output") or "").strip() if isinstance(cres, dict) else ""
+                if not cok:
+                    console_append(f"  ✕ checkout failed: {(cout.splitlines() or ['failed'])[0][:160]}", ok=False)
+                    _set_card_op_status(cp, f"Checkout {cb} failed", ok=False)
+                    _run_next_branch_fetch()
+                    return
+                console_append(f"$ git fetch — {cp}")
+                _set_card_op_status(cp, "Fetching…")
+                fetch = GitWorker("fetch", cp, executable=git_exe())
+                bulk_workers.append(fetch)
+
+                def after_fetch(fres, fworker=fetch, fp=p, fb=b) -> None:
+                    if fworker in bulk_workers:
+                        bulk_workers.remove(fworker)
+                    fok = bool(isinstance(fres, dict) and fres.get("ok"))
+                    fout = str((fres or {}).get("output") or "").strip() if isinstance(fres, dict) else ""
+                    summary = (fout.splitlines() or ["ok" if fok else "failed"])[0]
+                    console_append(f"  {'✓' if fok else '✕'} {summary[:200]}", ok=fok)
+                    if fok:
+                        bulk_meta["ok"] += 1
+                        _set_card_op_status(fp, f"{fb} · fetched", ok=True)
+                        refresh_card_status(fp)
+                    else:
+                        _set_card_op_status(fp, "Fetch failed", ok=False)
+                    _run_next_branch_fetch()
+
+                def fetch_failed(exc, fworker=fetch, fp=p) -> None:
+                    if fworker in bulk_workers:
+                        bulk_workers.remove(fworker)
+                    console_append(f"  ✕ {exc}", ok=False)
+                    _set_card_op_status(fp, "Fetch failed", ok=False)
+                    _run_next_branch_fetch()
+
+                fetch.signals.finished.connect(after_fetch)
+                fetch.signals.error.connect(fetch_failed)
+                QThreadPool.globalInstance().start(fetch)
+
+            def checkout_failed(exc, cworker=checkout, cp=p) -> None:
+                if cworker in bulk_workers:
+                    bulk_workers.remove(cworker)
+                console_append(f"  ✕ {exc}", ok=False)
+                _set_card_op_status(cp, "Checkout failed", ok=False)
+                _run_next_branch_fetch()
+
+            checkout.signals.finished.connect(after_checkout)
+            checkout.signals.error.connect(checkout_failed)
+            QThreadPool.globalInstance().start(checkout)
+
+        def has_failed(exc, current=worker, p=path) -> None:
+            if current in bulk_workers:
+                bulk_workers.remove(current)
+            console_append(f"  ✕ {exc}", ok=False)
+            _set_card_op_status(p, "Branch check failed", ok=False)
+            _run_next_branch_fetch()
+
+        worker.signals.finished.connect(after_has)
+        worker.signals.error.connect(has_failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _finish_branch_fetch() -> None:
+        branch = str(bulk_meta.get("branch") or "")
+        ok_count = bulk_meta["ok"]
+        skipped = int(bulk_meta.get("skipped") or 0)
+        total = bulk_meta["total"]
+        landing_state["bulk_busy"] = False
+        console_append(
+            f"  branch {branch} done — {ok_count}/{total} ok, {skipped} skipped",
+            ok=ok_count + skipped == total,
+        )
+        set_console_status("idle")
+        _set_bulk_enabled(
+            landing_state["group"] not in (None, "__demo__")
+            and bool(favorites_for_group())
+        )
 
     def run_bulk(op: str) -> None:
         """Sequentially run ``op`` over every repo in the selected group."""
@@ -1373,6 +1628,7 @@ def build_view(icons, ctx=None) -> QWidget:
             service.set("git.home.group", "" if landing_state["group"] is None else landing_state["group"])
             service.set("git.home.tabs", json.dumps(open_paths))
             service.set("git.home.active", active)
+            service.set("git.home.branch", branch_combo.currentText().strip())
         except Exception:  # noqa: BLE001 — persistence must never break the UI
             logger.exception("failed to persist git home view state")
 
@@ -1384,6 +1640,7 @@ def build_view(icons, ctx=None) -> QWidget:
             search = str(service.get("git.home.search") or "")
             group = service.get("git.home.group")
             active = str(service.get("git.home.active") or "")
+            prefer_branch = str(service.get("git.home.branch") or "")
             raw_tabs = service.get("git.home.tabs") or "[]"
             try:
                 open_paths = json.loads(raw_tabs) if isinstance(raw_tabs, str) else []
@@ -1392,6 +1649,7 @@ def build_view(icons, ctx=None) -> QWidget:
         except Exception:  # noqa: BLE001 — a bad saved value must never crash the view
             logger.exception("failed to restore git home view state")
             return
+        _refresh_branch_combo(prefer=prefer_branch)
         if search:
             search_edit.blockSignals(True)
             search_edit.setText(search)
@@ -1459,11 +1717,15 @@ def build_view(icons, ctx=None) -> QWidget:
     bulk_fetch.clicked.connect(lambda: run_bulk("fetch"))
     bulk_status.clicked.connect(lambda: run_bulk("status"))
     bulk_reset.clicked.connect(lambda: run_bulk("reset"))
+    branch_fetch.clicked.connect(run_branch_fetch)
+    branch_edit.clicked.connect(_edit_branches_dialog)
+    branch_combo.currentTextChanged.connect(lambda _text: persist_timer.start())
     console_toggle.clicked.connect(toggle_console)
     console_clear.clicked.connect(clear_console)
     tabs.tabCloseRequested.connect(close_tab)
     tabs.currentChanged.connect(lambda _index: _persist_view_state())
 
+    _refresh_branch_combo()
     _restore_view_state()
     refresh_favorites()
     # Defer status workers until after the landing widgets are fully built.

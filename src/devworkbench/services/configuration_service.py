@@ -211,6 +211,9 @@ SCHEMA: list[SettingDef] = [
         dict(key="git.home.group", label="Git home group filter", kind=SettingKind.STRING, default=""),
         dict(key="git.home.tabs", label="Git home open tabs", kind=SettingKind.STRING, default="[]"),
         dict(key="git.home.active", label="Git home active tab", kind=SettingKind.STRING, default=""),
+        dict(key="git.home.branches", label="Git home branch list", kind=SettingKind.STRING,
+             default='["main","master","develop"]'),
+        dict(key="git.home.branch", label="Git home selected branch", kind=SettingKind.STRING, default="main"),
     ),
     # -------------------------------------------------------------------- AI
     *_defs(
