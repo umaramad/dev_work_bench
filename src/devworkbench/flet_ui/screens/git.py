@@ -1,7 +1,8 @@
 """Git screen (Flet) — parity with ``devworkbench.modules.git``.
 
-Simplified layout for Flet 0.86: plain Column scrolling (no nested
-ListView/GridView expand), lightweight cards without stacked shadows.
+Split landing: left group list, right repos for the selected group,
+bulk Fetch/Status/Reset, and a collapsed console at the bottom.
+Uses Column scrolling (no nested ListView/GridView expand) for Flet 0.86.
 Debug logs go to ``<log_dir>/flet_git.log``.
 """
 
@@ -18,6 +19,8 @@ from devworkbench.models.persistence import Favorite
 from devworkbench.services.git import GitService
 
 _DEMO_REPOS = ("dev_work_bench", "freebuff-desktop", "scripts", "dotfiles")
+_GROUP_WIDTH = 240
+_CONSOLE_HEIGHT = 200
 logger = logging.getLogger("devworkbench.flet_ui.git")
 
 
@@ -58,29 +61,73 @@ class _GitView:
         self._search = ""
         self._status_cache: dict[str, dict] = {}
         self._open_path: str | None = None
+        self._bulk_busy = False
+        self._console_open = False
+        self._console_lines: list[str] = []
 
         self._card_buttons: dict[str, list[ft.Control]] = {}
         self._card_rings: dict[str, ft.ProgressRing] = {}
         self._card_status: dict[str, ft.Text] = {}
         self._card_badges: dict[str, ft.Text] = {}
 
-        self._list = ft.Column(spacing=10, tight=True)
-        self._debug = ft.Text("", size=11, color=theme.WARN, selectable=True)
+        self._groups_col = ft.Column(spacing=4, tight=True)
+        self._repos_col = ft.Column(spacing=10, tight=True)
         self._search_field = ft.TextField(
             label="Filter",
-            hint_text="Filter by name, path or group…",
+            hint_text="Filter by name or path…",
             prefix_icon=ft.Icons.SEARCH,
             border_radius=theme.RADIUS,
             focused_border_color=theme.ACCENT,
             on_change=self._on_search,
             expand=True,
+            dense=True,
         )
         self._group_title = ft.Text("", size=16, weight=ft.FontWeight.W_600, color=theme.TEXT)
         self._back_button = ft.IconButton(
             icon=ft.Icons.ARROW_BACK,
             icon_color=theme.TEXT_MUTED,
-            tooltip="Back to all groups",
+            tooltip="Close opened folder",
             on_click=lambda _e: self._back_to_groups(),
+            visible=False,
+        )
+        self._bulk_fetch = ft.OutlinedButton(
+            content="Fetch all",
+            icon=ft.Icons.CLOUD_DOWNLOAD,
+            on_click=lambda _e: self._run_bulk("fetch"),
+        )
+        self._bulk_status = ft.OutlinedButton(
+            content="Status all",
+            icon=ft.Icons.SEARCH,
+            on_click=lambda _e: self._run_bulk("status"),
+        )
+        self._bulk_reset = ft.OutlinedButton(
+            content="Reset all",
+            icon=ft.Icons.REFRESH,
+            on_click=lambda _e: self._run_bulk("reset"),
+        )
+        self._bulk_ring = ft.ProgressRing(
+            width=16, height=16, stroke_width=2, color=theme.ACCENT, visible=False
+        )
+        self._console_chevron = ft.Text("▸", size=14, color=theme.TEXT_MUTED)
+        self._console_status = ft.Text("idle", size=12, color=theme.TEXT_MUTED, expand=True)
+        self._console_body = ft.Column(spacing=2, tight=True)
+        self._console_scroll = ft.Container(
+            content=ft.Column(
+                [self._console_body],
+                expand=True,
+                scroll=ft.ScrollMode.AUTO,
+                auto_scroll=True,
+            ),
+            height=_CONSOLE_HEIGHT,
+            bgcolor=theme.BG,
+            border=theme.border_all(),
+            border_radius=theme.radius_all(theme.RADIUS),
+            padding=theme.padding_all(10),
+            visible=False,
+        )
+        self._console_clear = ft.TextButton(
+            content="Clear",
+            on_click=lambda _e: self._clear_console(),
             visible=False,
         )
         self._restore_view_state()
@@ -103,13 +150,92 @@ class _GitView:
             wrap=True,
             spacing=8,
         )
-        toolbar = ft.Row(
-            [self._back_button, self._group_title, ft.Container(expand=True), self._search_field],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        bulk_bar = ft.Row(
+            [self._bulk_fetch, self._bulk_status, self._bulk_reset, self._bulk_ring],
             spacing=8,
+            wrap=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        # Intentionally avoid nested theme.card + ListView/GridView expand —
-        # those collapsed to a blank panel on Flet 0.86 desktop.
+        right_header = ft.Column(
+            [
+                ft.Row(
+                    [self._back_button, self._group_title, ft.Container(expand=True), self._search_field],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=8,
+                ),
+                bulk_bar,
+            ],
+            spacing=8,
+            tight=True,
+        )
+        left_pane = ft.Container(
+            width=_GROUP_WIDTH,
+            content=ft.Column(
+                [
+                    ft.Text("Groups", size=12, weight=ft.FontWeight.W_600, color=theme.TEXT_MUTED),
+                    ft.Container(
+                        expand=True,
+                        content=ft.Column(
+                            [self._groups_col],
+                            expand=True,
+                            scroll=ft.ScrollMode.AUTO,
+                        ),
+                    ),
+                ],
+                expand=True,
+                spacing=8,
+            ),
+        )
+        right_pane = ft.Container(
+            expand=True,
+            content=ft.Column(
+                [
+                    right_header,
+                    ft.Divider(height=1, color=theme.BORDER),
+                    ft.Container(
+                        expand=True,
+                        content=ft.Column(
+                            [self._repos_col],
+                            expand=True,
+                            scroll=ft.ScrollMode.AUTO,
+                        ),
+                    ),
+                ],
+                expand=True,
+                spacing=10,
+            ),
+        )
+        split = ft.Row(
+            [
+                left_pane,
+                ft.VerticalDivider(width=1, color=theme.BORDER),
+                right_pane,
+            ],
+            expand=True,
+            spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+        console_header = ft.Container(
+            content=ft.Row(
+                [
+                    self._console_chevron,
+                    ft.Text("Console", size=13, weight=ft.FontWeight.W_600, color=theme.TEXT),
+                    self._console_status,
+                    self._console_clear,
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            ink=True,
+            on_click=lambda _e: self._toggle_console(),
+            padding=theme.padding_xy(8, 6),
+            border_radius=theme.radius_all(theme.RADIUS),
+        )
+        console = ft.Column(
+            [console_header, self._console_scroll],
+            spacing=4,
+            tight=True,
+        )
         root = ft.Container(
             expand=True,
             bgcolor=theme.SURFACE,
@@ -120,27 +246,20 @@ class _GitView:
                 [
                     ft.Text("Git repositories", size=18, weight=ft.FontWeight.W_600, color=theme.TEXT),
                     actions,
-                    toolbar,
-                    self._debug,
+                    ft.Container(expand=True, content=split),
                     ft.Divider(height=1, color=theme.BORDER),
-                    ft.Container(
-                        expand=True,
-                        content=ft.Column(
-                            [self._list],
-                            expand=True,
-                            scroll=ft.ScrollMode.AUTO,
-                        ),
-                    ),
+                    console,
                 ],
                 expand=True,
                 spacing=10,
             ),
         )
+        self._ensure_group_selection()
         self._refresh(update=False)
         logger.info(
-            "GitView.build done items=%d debug=%r",
-            len(self._list.controls),
-            self._debug.value,
+            "GitView.build done groups=%d repos=%d",
+            len(self._groups_col.controls),
+            len(self._repos_col.controls),
         )
         return root
 
@@ -189,6 +308,15 @@ class _GitView:
 
     # -- data ---------------------------------------------------------------------
 
+    def _section_counts(self) -> dict[str, int]:
+        if self._favorites is None:
+            return {"__demo__": len(_DEMO_REPOS)}
+        counts: dict[str, int] = {}
+        for favorite in self._favorites.by_kind("folder", limit=None):
+            key = (favorite.group_name or "").strip()
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
     def _favorites_for_group(self) -> list:
         if self._favorites is None:
             return []
@@ -208,73 +336,123 @@ class _GitView:
         groups.discard("")
         return tuple(sorted(groups, key=str.casefold))
 
+    def _ensure_group_selection(self) -> None:
+        counts = self._section_counts()
+        if not counts:
+            self._group = None
+            return
+        if self._group is not None and self._group in counts:
+            return
+        # Prefer named groups over Ungrouped when restoring a missing key.
+        ordered = sorted(counts, key=lambda g: (g == "", g.casefold()))
+        self._group = ordered[0]
+        self._persist_view_state()
+
     # -- rendering -----------------------------------------------------------------
 
     def _refresh(self, update: bool = True) -> None:
         try:
+            self._ensure_group_selection()
+            self._groups_col.controls = self._group_rows()
             if self._open_path:
-                items = self._open_folder_items()
-            elif self._group is None:
-                items = self._tiles_items()
+                self._repos_col.controls = self._open_folder_items()
+                self._set_bulk_enabled(False)
             else:
-                items = self._cards_items()
-            self._list.controls = items
-            self._debug.value = (
-                f"debug: group={self._group!r} open={self._open_path!r} "
-                f"items={len(items)} favorites={'on' if self._favorites else 'off'}"
+                self._repos_col.controls = self._cards_items()
+                can_bulk = (
+                    not self._bulk_busy
+                    and self._group is not None
+                    and self._group != "__demo__"
+                    and bool(self._favorites_for_group())
+                )
+                self._set_bulk_enabled(can_bulk)
+            logger.info(
+                "refresh ok groups=%d repos=%d group=%r",
+                len(self._groups_col.controls),
+                len(self._repos_col.controls),
+                self._group,
             )
-            logger.info("refresh ok items=%d group=%r", len(items), self._group)
         except Exception as exc:  # noqa: BLE001
             logger.exception("refresh failed")
-            self._list.controls = [
+            self._repos_col.controls = [
                 ft.Text(f"Could not load Git view: {exc}", color=theme.ERR, selectable=True)
             ]
-            self._debug.value = f"debug error: {exc}"
         if update:
             self.page.update()
-        if self._group is not None and self._group != "__demo__" and not self._open_path:
+        if (
+            self._group is not None
+            and self._group != "__demo__"
+            and not self._open_path
+            and not self._bulk_busy
+        ):
             self._refresh_all_statuses()
 
-    def _tiles_items(self) -> list[ft.Control]:
-        self._back_button.visible = False
-        self._group_title.visible = False
-        self._group_title.value = ""
+    def _group_rows(self) -> list[ft.Control]:
+        counts = self._section_counts()
+        if not counts:
+            return [ft.Text("No groups yet.", size=12, color=theme.TEXT_MUTED)]
 
-        if self._favorites is None:
-            return [self._tile("__demo__", "Demo folders", len(_DEMO_REPOS))]
-
-        favorites = list(self._favorites.by_kind("folder"))
-        sections: dict[str, list] = {"": []}
-        query = self._search.strip().lower()
-        for favorite in favorites:
-            if query:
-                hay = f"{favorite.group_name or ''} {favorite.label} {favorite.ref}".lower()
-                if query not in hay:
-                    continue
-            sections.setdefault((favorite.group_name or "").strip(), []).append(favorite)
-        tiles = []
-        for group in sorted(sections, key=lambda g: (g != "", g.casefold())):
-            members = sections[group]
-            if members:
-                tiles.append(self._tile(group, group or "Ungrouped", len(members)))
-        if not tiles:
-            msg = "No repositories match your search." if query else "No repositories yet. Use Add repository or Scan…"
-            return [ft.Text(msg, color=theme.TEXT_MUTED)]
-        return tiles
+        rows: list[ft.Control] = []
+        for key in sorted(counts, key=lambda g: (g == "", g == "__demo__", g.casefold())):
+            count = counts[key]
+            if key == "__demo__":
+                name = "Demo folders"
+            else:
+                name = key or "Ungrouped"
+            noun = "repo" if count == 1 else "repos"
+            selected = self._group == key and not self._open_path
+            rows.append(
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.FOLDER,
+                                color=theme.ACCENT if selected else theme.TEXT_MUTED,
+                                size=18,
+                            ),
+                            ft.Column(
+                                [
+                                    ft.Text(
+                                        name,
+                                        size=13,
+                                        weight=ft.FontWeight.W_600 if selected else ft.FontWeight.W_400,
+                                        color=theme.TEXT,
+                                    ),
+                                    ft.Text(f"{count} {noun}", size=11, color=theme.TEXT_MUTED),
+                                ],
+                                spacing=1,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    bgcolor=theme.ACCENT_SOFT if selected else theme.SURFACE_HOVER,
+                    border=theme.border_all(theme.ACCENT if selected else theme.BORDER),
+                    border_radius=theme.radius_all(theme.RADIUS),
+                    padding=theme.padding_xy(10, 8),
+                    ink=True,
+                    on_click=lambda _e, k=key: self._open_group(k),
+                )
+            )
+        return rows
 
     def _cards_items(self) -> list[ft.Control]:
-        self._back_button.visible = True
-        self._group_title.visible = True
-        self._group_title.value = "Demo folders" if self._group == "__demo__" else (self._group or "Ungrouped")
-
+        self._back_button.visible = False
         self._card_buttons = {}
         self._card_rings = {}
         self._card_status = {}
         self._card_badges = {}
 
+        if self._group is None:
+            self._group_title.value = "Select a group"
+            return [ft.Text("Choose a group on the left.", color=theme.TEXT_MUTED)]
+
         if self._group == "__demo__":
+            self._group_title.value = "Demo folders"
             return [self._card(name, name, demo=True) for name in _DEMO_REPOS]
 
+        self._group_title.value = self._group or "Ungrouped"
         members = self._favorites_for_group()
         query = self._search.strip().lower()
         if query:
@@ -285,9 +463,8 @@ class _GitView:
             ]
         members.sort(key=lambda favorite: (favorite.label or favorite.ref).casefold())
         if not members:
-            self._group = None
-            self._persist_view_state()
-            return self._tiles_items()
+            msg = "No repositories match your search." if query else "This group is empty."
+            return [ft.Text(msg, color=theme.TEXT_MUTED)]
         return [
             self._card(favorite.ref, favorite.label or os.path.basename(favorite.ref.rstrip("/")), demo=False)
             for favorite in members
@@ -297,40 +474,12 @@ class _GitView:
         path = self._open_path or ""
         label = os.path.basename(path.rstrip("/")) or path
         self._back_button.visible = True
-        self._group_title.visible = True
         self._group_title.value = f"Opened — {label}"
         self._card_buttons = {}
         self._card_rings = {}
         self._card_status = {}
         self._card_badges = {}
         return [self._card(path, label, demo=False, transient=True)]
-
-    def _tile(self, key: str, name: str, count: int) -> ft.Container:
-        noun = "repo" if count == 1 else "repos"
-        return ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.FOLDER, color=theme.ACCENT, size=26),
-                    ft.Column(
-                        [
-                            ft.Text(name, size=15, weight=ft.FontWeight.W_600, color=theme.TEXT),
-                            ft.Text(f"{count} {noun}", size=12, color=theme.TEXT_MUTED),
-                        ],
-                        spacing=2,
-                        expand=True,
-                    ),
-                    ft.Icon(ft.Icons.CHEVRON_RIGHT, color=theme.TEXT_FAINT),
-                ],
-                spacing=12,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            bgcolor=theme.SURFACE_HOVER,
-            border=theme.border_all(),
-            border_radius=theme.radius_all(theme.RADIUS),
-            padding=theme.padding_all(14),
-            ink=True,
-            on_click=lambda _e, k=key: self._open_group(k),
-        )
 
     def _card(self, path: str, label: str, demo: bool, transient: bool = False) -> ft.Container:
         title = ft.Text(label, size=15, weight=ft.FontWeight.W_600, color=theme.TEXT)
@@ -417,6 +566,12 @@ class _GitView:
     def _op_button(self, icon: str, text: str, op: str, path: str) -> ft.FilledButton:
         return ft.FilledButton(content=text, icon=icon, on_click=lambda _e: self._run_op(op, path))
 
+    def _set_bulk_enabled(self, enabled: bool) -> None:
+        self._bulk_fetch.disabled = not enabled
+        self._bulk_status.disabled = not enabled
+        self._bulk_reset.disabled = not enabled
+        self._bulk_ring.visible = self._bulk_busy
+
     # -- navigation ------------------------------------------------------------------
 
     def _open_group(self, key: str) -> None:
@@ -426,18 +581,48 @@ class _GitView:
         self._refresh()
 
     def _back_to_groups(self) -> None:
-        if self._open_path:
-            self._open_path = None
-            self._refresh()
-            return
-        self._group = None
-        self._persist_view_state()
+        self._open_path = None
         self._refresh()
 
     def _on_search(self, event) -> None:
         self._search = (event.control.value or "").strip()
         self._persist_view_state()
         self._refresh()
+
+    # -- console --------------------------------------------------------------------
+
+    def _toggle_console(self) -> None:
+        self._console_open = not self._console_open
+        self._console_chevron.value = "▾" if self._console_open else "▸"
+        self._console_scroll.visible = self._console_open
+        self._console_clear.visible = self._console_open
+        self.page.update()
+
+    def _clear_console(self) -> None:
+        self._console_lines.clear()
+        self._console_body.controls.clear()
+        if not self._bulk_busy:
+            self._console_status.value = "idle"
+        self.page.update()
+
+    def _set_console_status(self, text: str) -> None:
+        self._console_status.value = text
+
+    def _console_log(self, line: str, *, ok: bool | None = None) -> None:
+        color = theme.TEXT_MUTED
+        if ok is True:
+            color = theme.OK
+        elif ok is False:
+            color = theme.ERR
+        self._console_lines.append(line)
+        self._console_body.controls.append(
+            ft.Text(line, size=11, color=color, selectable=True, font_family="Menlo")
+        )
+        # Cap retained lines so the panel stays light.
+        while len(self._console_body.controls) > 400:
+            self._console_body.controls.pop(0)
+            if self._console_lines:
+                self._console_lines.pop(0)
 
     # -- async operations ---------------------------------------------------------------
 
@@ -454,6 +639,8 @@ class _GitView:
         if status is not None:
             status.value = f"Running git {op}…"
             status.color = theme.TEXT_MUTED
+        self._console_log(f"$ git {op} — {path}")
+        self._set_console_status(f"git {op}…")
         self.page.update()
 
         async def run():
@@ -496,6 +683,11 @@ class _GitView:
             status.value = f"{'✓' if ok else '✕'} git {op}: {first[:120]}"
             status.color = theme.OK if ok else theme.ERR
 
+        summary = detail.splitlines()[0] if detail else ("ok" if ok else "failed")
+        self._console_log(f"  {'✓' if ok else '✕'} {summary[:200]}", ok=ok)
+        if not self._bulk_busy:
+            self._set_console_status("idle")
+
         self._snack(f"git {op} {'succeeded' if ok else 'failed'} — {path}", ok=ok)
         if op in ("fetch", "fetch_all", "pull", "status"):
             self._refresh_status(path)
@@ -503,6 +695,80 @@ class _GitView:
 
         if op == "log" and ok and result.get("rows"):
             self._show_log_dialog(path, result["rows"])
+
+    def _run_bulk(self, op: str) -> None:
+        if self._bulk_busy or self._open_path or self._group in (None, "__demo__"):
+            return
+        members = self._favorites_for_group()
+        if not members:
+            return
+        paths = [favorite.ref for favorite in members]
+        self._bulk_busy = True
+        self._set_bulk_enabled(False)
+        self._bulk_ring.visible = True
+        label = {"fetch": "fetch", "status": "status", "reset": "reset"}.get(op, op)
+        self._console_log(f"$ bulk {label} — {len(paths)} repos in {self._group or 'Ungrouped'}")
+        self._set_console_status(f"{label} 0/{len(paths)}…")
+        self.page.update()
+
+        async def run():
+            results: list[tuple[str, dict]] = []
+            for index, path in enumerate(paths, start=1):
+                self._set_console_status(f"{label} {index}/{len(paths)}…")
+                self._console_log(f"$ git {op} — {path}")
+                self.page.update()
+                try:
+                    if op == "fetch":
+                        result = await self._git.fetch(path)
+                    elif op == "status":
+                        result = await self._git.status(path)
+                    elif op == "reset":
+                        result = await self._git.reset(path)
+                    else:
+                        result = {"ok": False, "output": f"unknown bulk op {op!r}"}
+                except Exception as exc:  # noqa: BLE001
+                    result = {"ok": False, "output": str(exc)}
+                results.append((path, result))
+                ok = bool(result.get("ok"))
+                detail = self._format_result(op, result)
+                summary = detail.splitlines()[0] if detail else ("ok" if ok else "failed")
+                self._console_log(f"  {'✓' if ok else '✕'} {summary[:200]}", ok=ok)
+                ring = self._card_rings.get(path)
+                status = self._card_status.get(path)
+                if ring is not None:
+                    ring.visible = False
+                if status is not None:
+                    status.value = f"{'✓' if ok else '✕'} git {op}: {summary[:120]}"
+                    status.color = theme.OK if ok else theme.ERR
+                self.page.update()
+            return results
+
+        future = self.page.run_task(run)
+        future.add_done_callback(lambda f: self._finish_bulk(op, f.result()))
+
+    def _finish_bulk(self, op: str, results: list[tuple[str, dict]]) -> None:
+        self._bulk_busy = False
+        self._bulk_ring.visible = False
+        ok_count = sum(1 for _, result in results if result.get("ok"))
+        total = len(results)
+        self._console_log(
+            f"  bulk {op} done — {ok_count}/{total} ok",
+            ok=ok_count == total,
+        )
+        self._set_console_status("idle")
+        self._snack(
+            f"Bulk {op}: {ok_count}/{total} succeeded",
+            ok=ok_count == total,
+        )
+        if op in ("fetch", "status"):
+            for path, _ in results:
+                self._refresh_status(path)
+        self._set_bulk_enabled(
+            self._group is not None
+            and self._group != "__demo__"
+            and bool(self._favorites_for_group())
+        )
+        self.page.update()
 
     def _format_result(self, op: str, result: dict) -> str:
         if op == "log" and result.get("rows"):
@@ -724,6 +990,9 @@ class _GitView:
                 self._favorites.update(favorite)
             groups[:] = list(self._known_groups())
             selected["group"] = new
+            if self._group == old:
+                self._group = new
+                self._persist_view_state()
             self._snack(f"Renamed group to {new}", ok=True)
             rebuild()
             self._refresh()
@@ -739,6 +1008,9 @@ class _GitView:
                 self._favorites.update(favorite)
             groups[:] = list(self._known_groups())
             selected["group"] = target if target in groups else None
+            if self._group == old:
+                self._group = target
+                self._persist_view_state()
             self._snack(f"Merged {old} → {target}", ok=True)
             rebuild()
             self._refresh()
@@ -753,6 +1025,9 @@ class _GitView:
             groups[:] = list(self._known_groups())
             selected["group"] = None
             rename_field.value = ""
+            if self._group == old:
+                self._group = ""
+                self._persist_view_state()
             self._snack(f"Ungrouped {old}", ok=True)
             rebuild()
             self._refresh()
