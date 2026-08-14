@@ -179,6 +179,7 @@ def build_view(icons, ctx=None) -> QWidget:
     favorites_list = QListWidget()
     favorites_list.setObjectName("favoritesList")
     favorites_list.setFrameStyle(0)
+    favorites_list.setSpacing(8)
     favorites_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     repos_pane_layout.addWidget(favorites_list, 1)
 
@@ -262,73 +263,121 @@ def build_view(icons, ctx=None) -> QWidget:
 
     def card_widget(path: str, label: str, demo: bool) -> QWidget:
         row = QWidget()
+        row.setObjectName("repoCard")
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(8, 6, 8, 6)
-        row_layout.setSpacing(10)
+        row_layout.setContentsMargins(12, 12, 12, 12)
+        row_layout.setSpacing(12)
+
         labels = QVBoxLayout()
-        labels.setSpacing(1)
+        labels.setSpacing(6)
+        labels.setContentsMargins(0, 0, 0, 0)
+
         name = QLabel(label or os.path.basename(path.rstrip("/")) or path)
+        name_font = name.font()
+        name_font.setBold(True)
+        name_font.setPointSize(max(name_font.pointSize(), 13))
+        name.setFont(name_font)
+        name.setWordWrap(False)
         labels.addWidget(name)
+
         path_text = QLabel(path)
         path_text.setObjectName("hint")
-        path_text.setWordWrap(True)
+        path_text.setToolTip(path)
+        path_text.setWordWrap(False)
+        path_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # Single-line elided path — full path stays in the tooltip.
+        metrics = path_text.fontMetrics()
+        path_text.setText(metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, 420))
+        path_text.setMinimumHeight(metrics.height() + 2)
         labels.addWidget(path_text)
-        # Per-card fetch result line (hidden until a fetch runs).
+
+        # Persistent branch / sync summary on its own row (avoids title crush).
+        remote_pill = QLabel("")
+        remote_pill.setObjectName("statusPill")
+        remote_pill.setProperty("role", "cardRemoteStatus")
+        remote_pill.setProperty("state", "")
+        remote_pill.setWordWrap(False)
+        remote_pill.setMinimumHeight(22)
+        remote_pill.hide()
+        labels.addWidget(remote_pill, 0, Qt.AlignmentFlag.AlignLeft)
+
+        # Short, ephemeral op feedback — never raw git ## lines.
         status_label = styled_label("", "hint")
         status_label.setProperty("role", "cardStatus")
-        status_label.setWordWrap(True)
+        status_label.setWordWrap(False)
+        status_label.setMinimumHeight(metrics.height() + 2)
         status_label.hide()
         labels.addWidget(status_label)
-        if not demo:
-            # Remote status line: "main · ↑1 ↓2" etc., filled in by an
-            # async remote_status worker (refresh button, post-fetch, timer).
-            remote_status_label = styled_label("", "hint")
-            remote_status_label.setObjectName("cardRemoteStatus")
-            remote_status_label.setProperty("role", "cardRemoteStatus")
-            remote_status_label.hide()
-            labels.addWidget(remote_status_label)
+
         row_layout.addLayout(labels, 1)
+
         if demo:
             pill = QLabel("demo")
             pill.setObjectName("statusPill")
             pill.setProperty("state", "warn")
-            row_layout.addWidget(pill)
+            row_layout.addWidget(pill, 0, Qt.AlignmentFlag.AlignTop)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(4)
+        actions.setContentsMargins(0, 0, 0, 0)
         open_btn = button("Open", "ghost")
         open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         open_btn.clicked.connect(lambda _checked=False, p=path: open_folder(p, demo=demo))
-        row_layout.addWidget(open_btn)
+        actions.addWidget(open_btn)
         if not demo:
             fetch_btn = icon_button(icons, "download", "Fetch this repository")
             fetch_btn.setObjectName("cardFetchButton")
             fetch_btn.clicked.connect(
                 lambda _checked=False, p=path: fetch_repo(p, fetch_btn, status_label)
             )
-            row_layout.addWidget(fetch_btn)
+            actions.addWidget(fetch_btn)
             status_refresh = icon_button(icons, "refresh", "Refresh remote status")
             status_refresh.setObjectName("cardStatusRefresh")
             status_refresh.clicked.connect(
                 lambda _checked=False, p=path: refresh_card_status(p)
             )
-            row_layout.addWidget(status_refresh)
+            actions.addWidget(status_refresh)
             edit_btn = icon_button(icons, "edit", "Edit repository")
             edit_btn.setObjectName("editRepoButton")
             edit_btn.clicked.connect(lambda _checked=False, p=path: edit_repository(p))
-            row_layout.addWidget(edit_btn)
+            actions.addWidget(edit_btn)
             unpin = icon_button(icons, "close", "Remove from favorites")
             unpin.setObjectName("unpinButton")
             unpin.clicked.connect(lambda _checked=False, p=path: remove_favorite(p))
-            row_layout.addWidget(unpin)
+            actions.addWidget(unpin)
+        row_layout.addLayout(actions, 0)
+        row_layout.setAlignment(actions, Qt.AlignmentFlag.AlignTop)
         return row
 
     def add_card(path: str, label: str, demo: bool) -> None:
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, path)
         widget = card_widget(path, label, demo)
-        item.setSizeHint(widget.sizeHint())
+        widget.adjustSize()
+        # Room for name + path + branch pill (+ toast when shown).
+        item.setSizeHint(widget.sizeHint().expandedTo(QSize(0, 96)))
         # The item must be in the list *before* setItemWidget — otherwise the
         # widget is never attached to the view and the card never renders.
         favorites_list.addItem(item)
         favorites_list.setItemWidget(item, widget)
+
+    def _relayout_card(path: str) -> None:
+        """Grow/shrink the list row after pill/toast visibility changes."""
+        try:
+            for i in range(favorites_list.count()):
+                item = favorites_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) != path:
+                    continue
+                widget = favorites_list.itemWidget(item)
+                if widget is None:
+                    return
+                widget.adjustSize()
+                hint = widget.sizeHint().expandedTo(QSize(0, 96))
+                if item.sizeHint() != hint:
+                    item.setSizeHint(hint)
+                return
+        except RuntimeError:
+            pass
 
     def add_group_row(key: str, name: str, count: int) -> None:
         """One selectable row in the left group list (name + repo count)."""
@@ -673,7 +722,7 @@ def build_view(icons, ctx=None) -> QWidget:
         QThreadPool.globalInstance().start(worker)
 
     def _finish_fetch(fetch_btn, status_label, ok: bool, output: str, path: str) -> None:
-        """Report the fetch result on the card, then auto-clear it.
+        """Report a short fetch result on the card, then auto-clear it.
 
         The landing list may be rebuilt while a fetch runs (e.g. a repo tab
         opens and auto-pins, refreshing the cards) — a RuntimeError means the
@@ -683,15 +732,7 @@ def build_view(icons, ctx=None) -> QWidget:
             fetch_btn._fetching = False
             fetch_btn.setEnabled(True)
             fetch_btn.setToolTip("Fetch this repository")
-            trimmed = (output or "").strip()
-            detail = trimmed.splitlines()[0] if trimmed else "Fetch complete"
-            status_label.setText(f"{'✓' if ok else '✕'} {detail[:90]}")
-            status_label.show()
-            timer = QTimer(status_label)  # dies with the card
-            timer.setSingleShot(True)
-            timer.setInterval(6000)
-            timer.timeout.connect(status_label.hide)
-            timer.start()
+            _show_card_toast(status_label, "Fetched" if ok else "Fetch failed", ok=ok, path=path)
         except RuntimeError:
             pass  # the card was rebuilt while the fetch ran
         # A fetch may have moved ahead/behind — refresh the card's remote
@@ -734,8 +775,61 @@ def build_view(icons, ctx=None) -> QWidget:
         if not landing_state["bulk_busy"]:
             set_console_status("idle")
 
-    def _set_card_op_status(path: str, text: str) -> None:
-        """Update the per-card status line if the card is still on screen."""
+    def _summarize_op(op: str, ok: bool, output: str) -> str:
+        """Human card toast — never dump raw ``## branch...`` git lines."""
+        if not ok:
+            return {
+                "fetch": "Fetch failed",
+                "status": "Status failed",
+                "reset": "Reset failed",
+            }.get(op, "Failed")
+        if op == "fetch":
+            return "Fetched"
+        if op == "reset":
+            return "Reset"
+        if op == "status":
+            lines = [line for line in (output or "").splitlines() if line.strip()]
+            branch_line = next((line for line in lines if line.startswith("##")), "")
+            dirty = [line for line in lines if not line.startswith("##")]
+            branch = "—"
+            if branch_line:
+                rest = branch_line[2:].strip()
+                branch = rest.split("...")[0].strip().split()[0] if rest else "—"
+            if dirty:
+                n = len(dirty)
+                return f"{branch} · {n} change{'s' if n != 1 else ''}"
+            return f"{branch} · clean"
+        return "Done"
+
+    def _show_card_toast(label, text: str, ok: bool = True, ms: int = 5000, path: str | None = None) -> None:
+        """Show a brief op result, then hide so the branch pill stays the focus."""
+        try:
+            label.setText(f"{'✓' if ok else '✕'}  {text}")
+            label.setProperty("state", "ok" if ok else "err")
+            label.style().unpolish(label)
+            label.style().polish(label)
+            label.show()
+            if path:
+                _relayout_card(path)
+
+            def _hide() -> None:
+                try:
+                    label.hide()
+                    if path:
+                        _relayout_card(path)
+                except RuntimeError:
+                    pass
+
+            timer = QTimer(label)
+            timer.setSingleShot(True)
+            timer.setInterval(ms)
+            timer.timeout.connect(_hide)
+            timer.start()
+        except RuntimeError:
+            pass
+
+    def _set_card_op_status(path: str, text: str, ok: bool | None = None) -> None:
+        """Update the per-card toast line if the card is still on screen."""
         try:
             for i in range(favorites_list.count()):
                 item = favorites_list.item(i)
@@ -746,8 +840,12 @@ def build_view(icons, ctx=None) -> QWidget:
                     return
                 for label in widget.findChildren(QLabel):
                     if label.property("role") == "cardStatus":
-                        label.setText(text)
-                        label.show()
+                        if ok is None:
+                            label.setText(text)
+                            label.show()
+                            _relayout_card(path)
+                        else:
+                            _show_card_toast(label, text, ok=ok, path=path)
                         return
         except RuntimeError:
             pass
@@ -782,7 +880,7 @@ def build_view(icons, ctx=None) -> QWidget:
         label = op
         set_console_status(f"{label} {bulk_meta['done']}/{bulk_meta['total']}…")
         console_append(f"$ git {op} — {path}")
-        _set_card_op_status(path, f"Running git {op}…")
+        _set_card_op_status(path, f"Running {op}…")
 
         worker = GitWorker(op, path, executable=git_exe())
         bulk_workers.append(worker)
@@ -798,7 +896,7 @@ def build_view(icons, ctx=None) -> QWidget:
                 output = str(result.get("output") or "").strip()
             summary = (output.splitlines() or ["ok" if ok else "failed"])[0]
             console_append(f"  {'✓' if ok else '✕'} {summary[:200]}", ok=ok)
-            _set_card_op_status(p, f"{'✓' if ok else '✕'} git {operation}: {summary[:90]}")
+            _set_card_op_status(p, _summarize_op(operation, ok, output), ok=ok)
             if operation in ("fetch", "status"):
                 refresh_card_status(p)
             _run_next_bulk()
@@ -807,7 +905,7 @@ def build_view(icons, ctx=None) -> QWidget:
             if current in bulk_workers:
                 bulk_workers.remove(current)
             console_append(f"  ✕ {exc}", ok=False)
-            _set_card_op_status(p, f"✕ git {operation}: {exc}")
+            _set_card_op_status(p, _summarize_op(operation, False, ""), ok=False)
             _run_next_bulk()
 
         worker.signals.finished.connect(done)
@@ -835,7 +933,7 @@ def build_view(icons, ctx=None) -> QWidget:
     # refreshed asynchronously via the ``remote_status`` git operation.
 
     def _format_remote_status(result: dict) -> str:
-        """Render a status result as a compact card line."""
+        """Render a status result as a compact card pill."""
         branch = result.get("branch") or ""
         upstream = result.get("upstream")
         ahead = int(result.get("ahead") or 0)
@@ -852,12 +950,14 @@ def build_view(icons, ctx=None) -> QWidget:
             return f"{branch} · ↓{behind}"
         return f"{branch} · up to date"
 
-    def _apply_remote_status(label, result: dict) -> None:
-        """Fill a card's remote label; plain folders stay empty and hidden."""
+    def _apply_remote_status(label, result: dict, path: str | None = None) -> None:
+        """Fill a card's branch pill; plain folders stay empty and hidden."""
         try:
             if not result.get("is_repo"):
                 label.setText("")
                 label.hide()
+                if path:
+                    _relayout_card(path)
                 return
             text = _format_remote_status(result)
             ahead = int(result.get("ahead") or 0)
@@ -870,14 +970,17 @@ def build_view(icons, ctx=None) -> QWidget:
             )
             label.setText(text)
             label.setProperty("state", state)
+            label.setToolTip(text)
             label.style().unpolish(label)
             label.style().polish(label)
             label.show()
+            if path:
+                _relayout_card(path)
         except RuntimeError:
             pass  # the card was rebuilt while the worker ran
 
-    def _card_status_label(path: str):
-        """The remote-status label of the live card for ``path`` (None if gone)."""
+    def _card_remote_pill(path: str):
+        """The branch/sync pill of the live card for ``path`` (None if gone)."""
         try:
             for i in range(favorites_list.count()):
                 item = favorites_list.item(i)
@@ -886,7 +989,9 @@ def build_view(icons, ctx=None) -> QWidget:
                 widget = favorites_list.itemWidget(item)
                 if widget is None:
                     return None
-                return widget.findChild(QLabel, "cardRemoteStatus")
+                for label in widget.findChildren(QLabel):
+                    if label.property("role") == "cardRemoteStatus":
+                        return label
         except RuntimeError:
             return None
         return None
@@ -897,15 +1002,14 @@ def build_view(icons, ctx=None) -> QWidget:
             for i in range(favorites_list.count()):
                 item = favorites_list.item(i)
                 path = item.data(Qt.ItemDataRole.UserRole)
-                widget = favorites_list.itemWidget(item)
-                if widget is None or not path:
+                if not path:
                     continue
                 result = status_cache.get(path)
                 if result is None:
                     continue
-                label = widget.findChild(QLabel, "cardRemoteStatus")
+                label = _card_remote_pill(path)
                 if label is not None:
-                    _apply_remote_status(label, result)
+                    _apply_remote_status(label, result, path)
         except RuntimeError:
             pass
 
@@ -920,9 +1024,9 @@ def build_view(icons, ctx=None) -> QWidget:
             if current in status_workers:
                 status_workers.remove(current)
             status_cache[path] = result
-            label = _card_status_label(path)
+            label = _card_remote_pill(path)
             if label is not None:
-                _apply_remote_status(label, result)
+                _apply_remote_status(label, result, path)
 
         def failed(_exc, current=worker) -> None:
             if current in status_workers:
@@ -930,11 +1034,12 @@ def build_view(icons, ctx=None) -> QWidget:
             status_cache[path] = {
                 "is_repo": False, "branch": "", "ahead": 0, "behind": 0, "upstream": None,
             }
-            label = _card_status_label(path)
+            label = _card_remote_pill(path)
             if label is not None:
                 try:
                     label.setText("")
                     label.hide()
+                    _relayout_card(path)
                 except RuntimeError:
                     pass
 
