@@ -18,6 +18,7 @@ import os
 from PySide6.QtCore import QSize, QThreadPool, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -48,6 +49,19 @@ from devworkbench.ui.widgets.common import button, clear_list_widget, icon_butto
 from devworkbench.workers.git_worker import GitWorker
 
 logger = logging.getLogger("devworkbench.modules.git")
+
+# Fixed card row height keeps the favorites list scroll smooth while status
+# pills / toasts update (no per-update sizeHint thrashing).
+_CARD_ROW_HEIGHT = 118
+
+
+def _bump_font(widget, delta: int = 2, min_pt: int = 13, *, bold: bool | None = None) -> None:
+    """Increase a widget's point size for the Git landing page."""
+    font = widget.font()
+    font.setPointSize(max(font.pointSize() + delta, min_pt))
+    if bold is not None:
+        font.setBold(bold)
+    widget.setFont(font)
 
 
 def build_view(icons, ctx=None) -> QWidget:
@@ -81,21 +95,26 @@ def build_view(icons, ctx=None) -> QWidget:
     heading_layout.setSpacing(8)
     title = QLabel("Git")
     title.setObjectName("sectionTitle")
+    _bump_font(title, 4, 18, bold=True)
     heading_layout.addWidget(title)
     subtitle = styled_label("Groups on the left · repos on the right · Open opens a tab", "hint")
+    _bump_font(subtitle, 2, 13)
     heading_layout.addWidget(subtitle)
     heading_layout.addStretch(1)
     open_button = button("Open folder…", "ghost")
     open_button.setObjectName("openFolderButton")
     open_button.setToolTip("Pick a folder and open it — it is added to your favorites automatically")
+    _bump_font(open_button, 2, 13)
     heading_layout.addWidget(open_button)
     scan_button = button("Scan for repositories…", "ghost")
     scan_button.setObjectName("scanForReposButton")
     scan_button.setToolTip("Scan a folder's subdirectories for git repositories, then add the ones you want")
+    _bump_font(scan_button, 2, 13)
     heading_layout.addWidget(scan_button)
     add_button = button("Add repository…", "primary")
     add_button.setObjectName("addRepositoryButton")
     add_button.setToolTip("Add a repository with a name and an optional group")
+    _bump_font(add_button, 2, 13)
     heading_layout.addWidget(add_button)
     landing_layout.addWidget(heading)
 
@@ -107,10 +126,12 @@ def build_view(icons, ctx=None) -> QWidget:
     search_edit = search_field("Filter repositories by name or path…")
     search_edit.setObjectName("repoSearch")
     search_edit.setMinimumWidth(220)
+    _bump_font(search_edit, 2, 13)
     toolbar_layout.addWidget(search_edit, 1)
     manage_button = button("Manage groups", "ghost")
     manage_button.setObjectName("manageGroupsButton")
     manage_button.setToolTip("Rename, merge or delete repository groups")
+    _bump_font(manage_button, 2, 13)
     toolbar_layout.addWidget(manage_button)
     refresh_button = icon_button(icons, "refresh", "Refresh repository list")
     refresh_button.setObjectName("refreshReposButton")
@@ -127,11 +148,15 @@ def build_view(icons, ctx=None) -> QWidget:
     groups_pane_layout = QVBoxLayout(groups_pane)
     groups_pane_layout.setContentsMargins(0, 0, 0, 0)
     groups_pane_layout.setSpacing(6)
-    groups_pane_layout.addWidget(styled_label("Groups", "hint"))
+    groups_heading = styled_label("Groups", "hint")
+    _bump_font(groups_heading, 2, 13)
+    groups_pane_layout.addWidget(groups_heading)
     groups_list = QListWidget()
     groups_list.setObjectName("groupList")
     groups_list.setFrameStyle(0)
     groups_list.setSpacing(4)
+    groups_list.setUniformItemSizes(True)
+    groups_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     groups_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
     groups_pane_layout.addWidget(groups_list, 1)
     groups_empty = styled_label(
@@ -139,6 +164,7 @@ def build_view(icons, ctx=None) -> QWidget:
         "hint",
     )
     groups_empty.setWordWrap(True)
+    _bump_font(groups_empty, 2, 13)
     groups_pane_layout.addWidget(groups_empty)
     split.addWidget(groups_pane)
 
@@ -149,9 +175,7 @@ def build_view(icons, ctx=None) -> QWidget:
     repos_pane_layout.setSpacing(8)
     repos_title = styled_label("", "muted")
     repos_title.setObjectName("groupTitle")
-    repos_title_font = repos_title.font()
-    repos_title_font.setBold(True)
-    repos_title.setFont(repos_title_font)
+    _bump_font(repos_title, 3, 16, bold=True)
     repos_pane_layout.addWidget(repos_title)
 
     # Shared branch list (common for all repos) + checkout/fetch for the group.
@@ -160,22 +184,27 @@ def build_view(icons, ctx=None) -> QWidget:
     branch_layout = QHBoxLayout(branch_bar)
     branch_layout.setContentsMargins(0, 0, 0, 0)
     branch_layout.setSpacing(6)
-    branch_layout.addWidget(styled_label("Branch", "hint"))
+    branch_label = styled_label("Branch", "hint")
+    _bump_font(branch_label, 2, 13)
+    branch_layout.addWidget(branch_label)
     branch_combo = QComboBox()
     branch_combo.setObjectName("branchCombo")
     branch_combo.setMinimumWidth(160)
     branch_combo.setToolTip("Shared branch list — used for Checkout & reset across this group")
+    _bump_font(branch_combo, 2, 13)
     branch_layout.addWidget(branch_combo, 1)
     branch_fetch = button("Checkout & reset", "primary")
     branch_fetch.setObjectName("branchFetchButton")
     branch_fetch.setToolTip(
-        "In each repo: checkout this branch (skip if missing locally), fetch, "
-        "then hard-reset to origin/<branch>"
+        "In each repo: fetch, checkout origin/<branch> (create/reset local), "
+        "hard-reset — discards local changes; errors show on the card"
     )
+    _bump_font(branch_fetch, 2, 13)
     branch_layout.addWidget(branch_fetch)
     branch_edit = button("Edit branches…", "ghost")
     branch_edit.setObjectName("branchEditButton")
     branch_edit.setToolTip("Configure the shared list of branch names")
+    _bump_font(branch_edit, 2, 13)
     branch_layout.addWidget(branch_edit)
     repos_pane_layout.addWidget(branch_bar)
 
@@ -187,14 +216,18 @@ def build_view(icons, ctx=None) -> QWidget:
     bulk_fetch = button("Fetch all", "ghost")
     bulk_fetch.setObjectName("bulkFetchButton")
     bulk_fetch.setToolTip("Fetch every repository in this group")
+    _bump_font(bulk_fetch, 2, 13)
     bulk_status = button("Status all", "ghost")
     bulk_status.setObjectName("bulkStatusButton")
     bulk_status.setToolTip("Run git status on every repository in this group")
+    _bump_font(bulk_status, 2, 13)
     bulk_reset = button("Reset all", "ghost")
     bulk_reset.setObjectName("bulkResetButton")
     bulk_reset.setToolTip("Run soft git reset on every repository in this group")
+    _bump_font(bulk_reset, 2, 13)
     bulk_busy_label = styled_label("", "hint")
     bulk_busy_label.setObjectName("bulkBusyLabel")
+    _bump_font(bulk_busy_label, 2, 13)
     bulk_busy_label.hide()
     bulk_layout.addWidget(bulk_fetch)
     bulk_layout.addWidget(bulk_status)
@@ -206,7 +239,10 @@ def build_view(icons, ctx=None) -> QWidget:
     favorites_list = QListWidget()
     favorites_list.setObjectName("favoritesList")
     favorites_list.setFrameStyle(0)
-    favorites_list.setSpacing(8)
+    favorites_list.setSpacing(6)
+    favorites_list.setUniformItemSizes(True)
+    favorites_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    favorites_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     favorites_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     repos_pane_layout.addWidget(favorites_list, 1)
 
@@ -215,6 +251,7 @@ def build_view(icons, ctx=None) -> QWidget:
         "hint",
     )
     empty_state.setWordWrap(True)
+    _bump_font(empty_state, 2, 13)
     repos_pane_layout.addWidget(empty_state)
     split.addWidget(repos_pane)
     split.setStretchFactor(0, 0)
@@ -238,12 +275,15 @@ def build_view(icons, ctx=None) -> QWidget:
     console_toggle.setFlat(True)
     console_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
     console_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    _bump_font(console_toggle, 2, 13)
     console_header_layout.addWidget(console_toggle)
     console_status = styled_label("idle", "hint")
     console_status.setObjectName("consoleStatus")
+    _bump_font(console_status, 2, 13)
     console_header_layout.addWidget(console_status, 1)
     console_clear = button("Clear", "ghost")
     console_clear.setObjectName("consoleClear")
+    _bump_font(console_clear, 2, 13)
     console_clear.hide()
     console_header_layout.addWidget(console_clear)
     console_wrap_layout.addWidget(console_header)
@@ -251,7 +291,7 @@ def build_view(icons, ctx=None) -> QWidget:
     console_log.setObjectName("consoleLog")
     console_log.setReadOnly(True)
     console_log.setMaximumBlockCount(500)
-    console_log.setFont(QFont("Menlo", 11))
+    console_log.setFont(QFont("Menlo", 12))
     console_log.setFixedHeight(200)
     console_log.hide()
     console_wrap_layout.addWidget(console_log)
@@ -279,6 +319,7 @@ def build_view(icons, ctx=None) -> QWidget:
         "console_open": False,
         "bulk_busy": False,
         "refreshing": False,
+        "status_gen": 0,
     }
     # Last known remote status per repo path, rendered onto fresh cards after
     # a rebuild; refreshed on demand, after each fetch and on a timer.
@@ -300,10 +341,7 @@ def build_view(icons, ctx=None) -> QWidget:
         labels.setContentsMargins(0, 0, 0, 0)
 
         name = QLabel(label or os.path.basename(path.rstrip("/")) or path)
-        name_font = name.font()
-        name_font.setBold(True)
-        name_font.setPointSize(max(name_font.pointSize() + 2, 15))
-        name.setFont(name_font)
+        _bump_font(name, 3, 16, bold=True)
         name.setWordWrap(False)
         labels.addWidget(name)
 
@@ -312,37 +350,29 @@ def build_view(icons, ctx=None) -> QWidget:
         path_text.setToolTip(path)
         path_text.setWordWrap(False)
         path_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        path_font = path_text.font()
-        path_font.setPointSize(max(path_font.pointSize() + 1, 12))
-        path_text.setFont(path_font)
+        _bump_font(path_text, 2, 13)
         # Single-line elided path — full path stays in the tooltip.
         metrics = path_text.fontMetrics()
-        path_text.setText(metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, 420))
-        path_text.setMinimumHeight(metrics.height() + 2)
+        path_text.setText(metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, 480))
+        path_text.setFixedHeight(metrics.height() + 2)
         labels.addWidget(path_text)
 
-        # Persistent branch / sync summary on its own row (avoids title crush).
-        remote_pill = QLabel("")
+        # Persistent branch / sync summary — fixed height so list rows don't jump.
+        remote_pill = QLabel("…")
         remote_pill.setObjectName("statusPill")
         remote_pill.setProperty("role", "cardRemoteStatus")
         remote_pill.setProperty("state", "")
         remote_pill.setWordWrap(False)
-        remote_pill.setMinimumHeight(24)
-        pill_font = remote_pill.font()
-        pill_font.setPointSize(max(pill_font.pointSize() + 1, 12))
-        remote_pill.setFont(pill_font)
-        remote_pill.hide()
+        remote_pill.setFixedHeight(26)
+        _bump_font(remote_pill, 2, 13)
         labels.addWidget(remote_pill, 0, Qt.AlignmentFlag.AlignLeft)
 
-        # Short, ephemeral op feedback — never raw git ## lines.
+        # Short op feedback — reserved slot (clear text instead of hide/show).
         status_label = styled_label("", "hint")
         status_label.setProperty("role", "cardStatus")
         status_label.setWordWrap(False)
-        status_font = status_label.font()
-        status_font.setPointSize(max(status_font.pointSize() + 1, 12))
-        status_label.setFont(status_font)
-        status_label.setMinimumHeight(metrics.height() + 2)
-        status_label.hide()
+        _bump_font(status_label, 2, 13)
+        status_label.setFixedHeight(metrics.height() + 2)
         labels.addWidget(status_label)
 
         row_layout.addLayout(labels, 1)
@@ -351,6 +381,7 @@ def build_view(icons, ctx=None) -> QWidget:
             pill = QLabel("demo")
             pill.setObjectName("statusPill")
             pill.setProperty("state", "warn")
+            _bump_font(pill, 1, 12)
             row_layout.addWidget(pill, 0, Qt.AlignmentFlag.AlignTop)
 
         actions = QHBoxLayout()
@@ -358,6 +389,7 @@ def build_view(icons, ctx=None) -> QWidget:
         actions.setContentsMargins(0, 0, 0, 0)
         open_btn = button("Open", "ghost")
         open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _bump_font(open_btn, 2, 13)
         open_btn.clicked.connect(lambda _checked=False, p=path: open_folder(p, demo=demo))
         actions.addWidget(open_btn)
         if not demo:
@@ -389,31 +421,12 @@ def build_view(icons, ctx=None) -> QWidget:
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, path)
         widget = card_widget(path, label, demo)
-        widget.adjustSize()
-        # Room for name + path + branch pill (+ toast when shown).
-        item.setSizeHint(widget.sizeHint().expandedTo(QSize(0, 96)))
+        # Fixed height — status updates must not resize rows (scroll jank).
+        item.setSizeHint(QSize(0, _CARD_ROW_HEIGHT))
         # The item must be in the list *before* setItemWidget — otherwise the
         # widget is never attached to the view and the card never renders.
         favorites_list.addItem(item)
         favorites_list.setItemWidget(item, widget)
-
-    def _relayout_card(path: str) -> None:
-        """Grow/shrink the list row after pill/toast visibility changes."""
-        try:
-            for i in range(favorites_list.count()):
-                item = favorites_list.item(i)
-                if item.data(Qt.ItemDataRole.UserRole) != path:
-                    continue
-                widget = favorites_list.itemWidget(item)
-                if widget is None:
-                    return
-                widget.adjustSize()
-                hint = widget.sizeHint().expandedTo(QSize(0, 96))
-                if item.sizeHint() != hint:
-                    item.setSizeHint(hint)
-                return
-        except RuntimeError:
-            pass
 
     def add_group_row(key: str, name: str, count: int) -> None:
         """One selectable row in the left group list (name + repo count)."""
@@ -429,25 +442,24 @@ def build_view(icons, ctx=None) -> QWidget:
         row.setCheckable(True)
         row.setChecked(key == landing_state["group"])
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setContentsMargins(8, 8, 8, 8)
         row_layout.setSpacing(8)
         icon_label = QLabel()
         icon_label.setPixmap(icons.get("folder", 18).pixmap(18, 18))
         icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         row_layout.addWidget(icon_label)
         text_col = QVBoxLayout()
-        text_col.setSpacing(1)
+        text_col.setSpacing(2)
         name_label = QLabel(name)
-        name_font = name_label.font()
-        name_font.setBold(True)
-        name_label.setFont(name_font)
+        _bump_font(name_label, 2, 14, bold=True)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         text_col.addWidget(name_label)
         count_label = styled_label(f"{count} {noun}", "hint")
+        _bump_font(count_label, 2, 12)
         count_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         text_col.addWidget(count_label)
         row_layout.addLayout(text_col, 1)
-        item.setSizeHint(QSize(200, 48))
+        item.setSizeHint(QSize(200, 56))
         groups_list.addItem(item)
         groups_list.setItemWidget(item, row)
         row.clicked.connect(lambda _checked=False, k=key: open_group(k))
@@ -538,6 +550,17 @@ def build_view(icons, ctx=None) -> QWidget:
                 break
         groups_list.blockSignals(False)
 
+    def _sync_group_checked(key: str | None) -> None:
+        """Update checked styles without rebuilding the left list."""
+        if key is None:
+            return
+        for i in range(groups_list.count()):
+            item = groups_list.item(i)
+            widget = groups_list.itemWidget(item)
+            if isinstance(widget, QPushButton):
+                widget.setChecked(item.data(Qt.ItemDataRole.UserRole) == key)
+        _select_group_item(key)
+
     def favorites_for_group() -> list:
         group = landing_state["group"]
         if favorites_repo is None or group is None or group == "__demo__":
@@ -548,14 +571,15 @@ def build_view(icons, ctx=None) -> QWidget:
             if (favorite.group_name or "").strip() == group
         ]
 
-    def refresh_favorites() -> None:
-        """Rebuild both panes: group list + cards for the selected group."""
+    def refresh_repo_cards() -> None:
+        """Rebuild only the right-hand repo list for the current group."""
         if landing_state.get("refreshing"):
             return
         landing_state["refreshing"] = True
+        # Invalidate staggered status timers from a previous group selection.
+        landing_state["status_gen"] = int(landing_state.get("status_gen") or 0) + 1
+        favorites_list.setUpdatesEnabled(False)
         try:
-            ensure_group_selection()
-            refresh_groups()
             group = landing_state["group"]
             clear_list_widget(favorites_list)
 
@@ -600,7 +624,16 @@ def build_view(icons, ctx=None) -> QWidget:
             _set_bulk_enabled(not landing_state["bulk_busy"])
             _render_card_statuses()
         finally:
+            favorites_list.setUpdatesEnabled(True)
             landing_state["refreshing"] = False
+
+    def refresh_favorites() -> None:
+        """Rebuild both panes: group list + cards for the selected group."""
+        if landing_state.get("refreshing"):
+            return
+        ensure_group_selection()
+        refresh_groups()
+        refresh_repo_cards()
 
     def open_group(key: str) -> None:
         """Select a group and refresh the right-hand repo list in place."""
@@ -608,12 +641,15 @@ def build_view(icons, ctx=None) -> QWidget:
             return
         if key == landing_state["group"] and favorites_list.count() > 0:
             # Already showing this group — still sync the checked row state.
-            _select_group_item(key)
+            _sync_group_checked(key)
             return
         landing_state["group"] = key
-        refresh_favorites()
+        _sync_group_checked(key)
+        # Only rebuild the repo pane — rebuilding groups on every click was janky.
+        refresh_repo_cards()
         if landing_state["group"] not in (None, "__demo__") and not landing_state["bulk_busy"]:
-            refresh_all_statuses()
+            # Let the list paint first, then kick off status workers.
+            QTimer.singleShot(0, refresh_all_statuses)
         persist_timer.start()
 
     def add_repository() -> None:
@@ -841,21 +877,19 @@ def build_view(icons, ctx=None) -> QWidget:
         return "Done"
 
     def _show_card_toast(label, text: str, ok: bool = True, ms: int = 5000, path: str | None = None) -> None:
-        """Show a brief op result, then hide so the branch pill stays the focus."""
+        """Show a brief op result, then clear so the branch pill stays the focus."""
         try:
             label.setText(f"{'✓' if ok else '✕'}  {text}")
             label.setProperty("state", "ok" if ok else "err")
             label.style().unpolish(label)
             label.style().polish(label)
-            label.show()
-            if path:
-                _relayout_card(path)
 
             def _hide() -> None:
                 try:
-                    label.hide()
-                    if path:
-                        _relayout_card(path)
+                    label.setText("")
+                    label.setProperty("state", "")
+                    label.style().unpolish(label)
+                    label.style().polish(label)
                 except RuntimeError:
                     pass
 
@@ -881,8 +915,6 @@ def build_view(icons, ctx=None) -> QWidget:
                     if label.property("role") == "cardStatus":
                         if ok is None:
                             label.setText(text)
-                            label.show()
-                            _relayout_card(path)
                         else:
                             _show_card_toast(label, text, ok=ok, path=path)
                         return
@@ -970,7 +1002,7 @@ def build_view(icons, ctx=None) -> QWidget:
         dialog.exec()
 
     def run_branch_fetch() -> None:
-        """Checkout selected branch, fetch, hard-reset to origin/<branch> — per group repo."""
+        """Fetch, checkout origin/<branch>, hard-reset — per group repo (no local check)."""
         if landing_state["bulk_busy"]:
             return
         branch = branch_combo.currentText().strip()
@@ -995,7 +1027,6 @@ def build_view(icons, ctx=None) -> QWidget:
             "done": 0,
             "total": len(paths),
             "ok": 0,
-            "skipped": 0,
         })
         _set_bulk_enabled(False)
         if not landing_state.get("console_open"):
@@ -1019,7 +1050,6 @@ def build_view(icons, ctx=None) -> QWidget:
             label.setToolTip(text)
             label.style().unpolish(label)
             label.style().polish(label)
-            label.show()
             status_cache[path] = {
                 **(status_cache.get(path) or {}),
                 "is_repo": True,
@@ -1028,7 +1058,6 @@ def build_view(icons, ctx=None) -> QWidget:
                 "behind": 0,
                 "upstream": f"origin/{branch}",
             }
-            _relayout_card(path)
         except RuntimeError:
             pass
 
@@ -1040,176 +1069,168 @@ def build_view(icons, ctx=None) -> QWidget:
         path = bulk_queue.pop(0)
         bulk_meta["done"] += 1
         set_console_status(f"reset {bulk_meta['done']}/{bulk_meta['total']}…")
-        console_append(f"$ has_branch {branch} — {path}")
-        _set_card_op_status(path, f"Checking {branch}…")
 
-        worker = GitWorker("has_branch", path, args=(branch,), executable=git_exe())
-        bulk_workers.append(worker)
+        def _err_line(output: str, fallback: str) -> str:
+            for line in (output or "").splitlines():
+                text = line.strip()
+                if text:
+                    return text[:120]
+            return fallback
 
-        def after_has(result, current=worker, p=path, b=branch) -> None:
-            if current in bulk_workers:
-                bulk_workers.remove(current)
-            exists = bool(isinstance(result, dict) and result.get("exists"))
-            if not exists:
-                bulk_meta["skipped"] = int(bulk_meta.get("skipped") or 0) + 1
-                console_append(f"  · skip — no local branch {b}", ok=None)
-                _set_card_op_status(p, f"Skipped — no {b}", ok=False)
+        # Always fetch first — local branch presence does not matter.
+        console_append(f"$ git fetch — {path}")
+        _set_card_op_status(path, "Fetching…")
+        fetch = GitWorker("fetch", path, executable=git_exe())
+        bulk_workers.append(fetch)
+
+        def after_fetch(fres, fworker=fetch, fp=path, fb=branch) -> None:
+            if fworker in bulk_workers:
+                bulk_workers.remove(fworker)
+            fok = bool(isinstance(fres, dict) and fres.get("ok"))
+            fout = str((fres or {}).get("output") or "").strip() if isinstance(fres, dict) else ""
+            summary = _err_line(fout, "ok" if fok else "failed")
+            console_append(f"  {'✓' if fok else '✕'} fetch: {summary[:180]}", ok=fok)
+            if not fok:
+                _set_card_op_status(fp, f"Fetch failed — {summary}", ok=False)
                 _run_next_branch_fetch()
                 return
-            # Fetch first so origin/<branch> is current before force-checkout + hard reset.
-            console_append(f"$ git fetch — {p}")
-            _set_card_op_status(p, "Fetching…")
-            fetch = GitWorker("fetch", p, executable=git_exe())
-            bulk_workers.append(fetch)
 
-            def after_fetch(fres, fworker=fetch, fp=p, fb=b) -> None:
-                if fworker in bulk_workers:
-                    bulk_workers.remove(fworker)
-                fok = bool(isinstance(fres, dict) and fres.get("ok"))
-                fout = str((fres or {}).get("output") or "").strip() if isinstance(fres, dict) else ""
-                summary = (fout.splitlines() or ["ok" if fok else "failed"])[0]
-                console_append(f"  {'✓' if fok else '✕'} fetch: {summary[:180]}", ok=fok)
-                if not fok:
-                    _set_card_op_status(fp, "Fetch failed", ok=False)
+            # Require origin/<branch> after fetch; otherwise error on the card.
+            console_append(f"$ has_remote origin/{fb} — {fp}")
+            _set_card_op_status(fp, f"Checking origin/{fb}…")
+            remote_check = GitWorker(
+                "has_branch", fp, args=(fb, "origin"), executable=git_exe()
+            )
+            bulk_workers.append(remote_check)
+
+            def after_remote(rres, rworker=remote_check, rp=fp, rb=fb) -> None:
+                if rworker in bulk_workers:
+                    bulk_workers.remove(rworker)
+                rexists = bool(isinstance(rres, dict) and rres.get("exists"))
+                if not rexists:
+                    msg = f"No origin/{rb}"
+                    console_append(f"  ✕ {msg}", ok=False)
+                    _set_card_op_status(rp, msg, ok=False)
                     _run_next_branch_fetch()
                     return
-                # Force checkout: hard-reset follows, so discard local dirt that blocks switch.
-                console_append(f"$ git checkout -f {fb} — {fp}")
-                _set_card_op_status(fp, f"Checkout {fb}…")
-                checkout = GitWorker("checkout", fp, args=(fb, "force"), executable=git_exe())
+
+                # Create/reset local branch from remote tip; -f discards local dirt.
+                target = f"origin/{rb}"
+                console_append(f"$ git checkout -f -B {rb} {target} — {rp}")
+                _set_card_op_status(rp, f"Checkout {rb}…")
+                checkout = GitWorker(
+                    "checkout", rp, args=(rb, "force", "origin"), executable=git_exe()
+                )
                 bulk_workers.append(checkout)
 
-                def after_checkout(cres, cworker=checkout, cp=fp, cb=fb) -> None:
+                def after_checkout(cres, cworker=checkout, cp=rp, cb=rb) -> None:
                     if cworker in bulk_workers:
                         bulk_workers.remove(cworker)
                     cok = bool(isinstance(cres, dict) and cres.get("ok"))
-                    cout = str((cres or {}).get("output") or "").strip() if isinstance(cres, dict) else ""
+                    cout = (
+                        str((cres or {}).get("output") or "").strip()
+                        if isinstance(cres, dict)
+                        else ""
+                    )
                     if not cok:
-                        console_append(
-                            f"  ✕ checkout failed: {(cout.splitlines() or ['failed'])[0][:160]}",
-                            ok=False,
-                        )
-                        _set_card_op_status(cp, f"Checkout {cb} failed", ok=False)
+                        err = _err_line(cout, "checkout failed")
+                        console_append(f"  ✕ checkout failed: {err}", ok=False)
+                        _set_card_op_status(cp, f"Checkout failed — {err}", ok=False)
                         _run_next_branch_fetch()
                         return
-                    console_append(f"  ✓ checked out {cb}", ok=True)
+                    console_append(f"  ✓ checked out {cb} from origin/{cb}", ok=True)
                     _set_card_branch_pill(cp, cb)
-                    # Confirm origin/<branch> exists before hard reset.
-                    console_append(f"$ has_remote origin/{cb} — {cp}")
-                    remote_check = GitWorker(
-                        "has_branch", cp, args=(cb, "origin"), executable=git_exe()
+
+                    # Hard-reset to remote tip — wipe remaining local divergence.
+                    rtarget = f"origin/{cb}"
+                    console_append(f"$ git reset --hard {rtarget} — {cp}")
+                    _set_card_op_status(cp, f"Reset {rtarget}…")
+                    reset = GitWorker(
+                        "reset", cp, args=("hard", rtarget), executable=git_exe()
                     )
-                    bulk_workers.append(remote_check)
+                    bulk_workers.append(reset)
 
-                    def after_remote(rres, rworker=remote_check, rp=cp, rb=cb) -> None:
-                        if rworker in bulk_workers:
-                            bulk_workers.remove(rworker)
-                        rexists = bool(isinstance(rres, dict) and rres.get("exists"))
-                        if not rexists:
-                            bulk_meta["skipped"] = int(bulk_meta.get("skipped") or 0) + 1
-                            console_append(f"  · skip reset — no origin/{rb} (still on {rb})", ok=None)
-                            _set_card_op_status(rp, f"On {rb} · no origin/{rb}", ok=False)
-                            _set_card_branch_pill(rp, rb, state="warn")
-                            refresh_card_status(rp)
-                            _run_next_branch_fetch()
-                            return
-                        target = f"origin/{rb}"
-                        console_append(f"$ git reset --hard {target} — {rp}")
-                        _set_card_op_status(rp, f"Reset {target}…")
-                        reset = GitWorker(
-                            "reset", rp, args=("hard", target), executable=git_exe()
+                    def after_reset(zres, zworker=reset, zp=cp, zb=cb) -> None:
+                        if zworker in bulk_workers:
+                            bulk_workers.remove(zworker)
+                        zok = bool(isinstance(zres, dict) and zres.get("ok"))
+                        zout = (
+                            str((zres or {}).get("output") or "").strip()
+                            if isinstance(zres, dict)
+                            else ""
                         )
-                        bulk_workers.append(reset)
-
-                        def after_reset(zres, zworker=reset, zp=rp, zb=rb) -> None:
-                            if zworker in bulk_workers:
-                                bulk_workers.remove(zworker)
-                            zok = bool(isinstance(zres, dict) and zres.get("ok"))
-                            zout = (
-                                str((zres or {}).get("output") or "").strip()
-                                if isinstance(zres, dict)
-                                else ""
-                            )
-                            zsum = (zout.splitlines() or ["ok" if zok else "failed"])[0]
-                            console_append(f"  {'✓' if zok else '✕'} {zsum[:200]}", ok=zok)
-                            if zok:
-                                bulk_meta["ok"] += 1
-                                _set_card_op_status(zp, f"{zb} · reset to origin", ok=True)
-                                _set_card_branch_pill(zp, zb, state="ok")
-                                refresh_card_status(zp)
-                            else:
-                                _set_card_op_status(zp, "Reset failed", ok=False)
-                                # Still show the checked-out branch name.
-                                _set_card_branch_pill(zp, zb, state="warn")
-                                refresh_card_status(zp)
-                            _run_next_branch_fetch()
-
-                        def reset_failed(exc, zworker=reset, zp=rp, zb=rb) -> None:
-                            if zworker in bulk_workers:
-                                bulk_workers.remove(zworker)
-                            console_append(f"  ✕ {exc}", ok=False)
-                            _set_card_op_status(zp, "Reset failed", ok=False)
+                        zsum = _err_line(zout, "ok" if zok else "reset failed")
+                        console_append(f"  {'✓' if zok else '✕'} {zsum[:200]}", ok=zok)
+                        if zok:
+                            bulk_meta["ok"] += 1
+                            _set_card_op_status(zp, f"{zb} · reset to origin", ok=True)
+                            _set_card_branch_pill(zp, zb, state="ok")
+                            refresh_card_status(zp)
+                        else:
+                            _set_card_op_status(zp, f"Reset failed — {zsum}", ok=False)
                             _set_card_branch_pill(zp, zb, state="warn")
-                            _run_next_branch_fetch()
-
-                        reset.signals.finished.connect(after_reset)
-                        reset.signals.error.connect(reset_failed)
-                        QThreadPool.globalInstance().start(reset)
-
-                    def remote_failed(exc, rworker=remote_check, rp=cp, rb=cb) -> None:
-                        if rworker in bulk_workers:
-                            bulk_workers.remove(rworker)
-                        console_append(f"  ✕ {exc}", ok=False)
-                        _set_card_op_status(rp, "Remote check failed", ok=False)
-                        _set_card_branch_pill(rp, rb, state="warn")
+                            refresh_card_status(zp)
                         _run_next_branch_fetch()
 
-                    remote_check.signals.finished.connect(after_remote)
-                    remote_check.signals.error.connect(remote_failed)
-                    QThreadPool.globalInstance().start(remote_check)
+                    def reset_failed(exc, zworker=reset, zp=cp, zb=cb) -> None:
+                        if zworker in bulk_workers:
+                            bulk_workers.remove(zworker)
+                        err = str(exc)
+                        console_append(f"  ✕ {err}", ok=False)
+                        _set_card_op_status(zp, f"Reset failed — {err[:100]}", ok=False)
+                        _set_card_branch_pill(zp, zb, state="warn")
+                        _run_next_branch_fetch()
 
-                def checkout_failed(exc, cworker=checkout, cp=fp) -> None:
+                    reset.signals.finished.connect(after_reset)
+                    reset.signals.error.connect(reset_failed)
+                    QThreadPool.globalInstance().start(reset)
+
+                def checkout_failed(exc, cworker=checkout, cp=rp) -> None:
                     if cworker in bulk_workers:
                         bulk_workers.remove(cworker)
-                    console_append(f"  ✕ {exc}", ok=False)
-                    _set_card_op_status(cp, "Checkout failed", ok=False)
+                    err = str(exc)
+                    console_append(f"  ✕ {err}", ok=False)
+                    _set_card_op_status(cp, f"Checkout failed — {err[:100]}", ok=False)
                     _run_next_branch_fetch()
 
                 checkout.signals.finished.connect(after_checkout)
                 checkout.signals.error.connect(checkout_failed)
                 QThreadPool.globalInstance().start(checkout)
 
-            def fetch_failed(exc, fworker=fetch, fp=p) -> None:
-                if fworker in bulk_workers:
-                    bulk_workers.remove(fworker)
-                console_append(f"  ✕ {exc}", ok=False)
-                _set_card_op_status(fp, "Fetch failed", ok=False)
+            def remote_failed(exc, rworker=remote_check, rp=fp) -> None:
+                if rworker in bulk_workers:
+                    bulk_workers.remove(rworker)
+                err = str(exc)
+                console_append(f"  ✕ {err}", ok=False)
+                _set_card_op_status(rp, f"Remote check failed — {err[:100]}", ok=False)
                 _run_next_branch_fetch()
 
-            fetch.signals.finished.connect(after_fetch)
-            fetch.signals.error.connect(fetch_failed)
-            QThreadPool.globalInstance().start(fetch)
+            remote_check.signals.finished.connect(after_remote)
+            remote_check.signals.error.connect(remote_failed)
+            QThreadPool.globalInstance().start(remote_check)
 
-        def has_failed(exc, current=worker, p=path) -> None:
-            if current in bulk_workers:
-                bulk_workers.remove(current)
-            console_append(f"  ✕ {exc}", ok=False)
-            _set_card_op_status(p, "Branch check failed", ok=False)
+        def fetch_failed(exc, fworker=fetch, fp=path) -> None:
+            if fworker in bulk_workers:
+                bulk_workers.remove(fworker)
+            err = str(exc)
+            console_append(f"  ✕ {err}", ok=False)
+            _set_card_op_status(fp, f"Fetch failed — {err[:100]}", ok=False)
             _run_next_branch_fetch()
 
-        worker.signals.finished.connect(after_has)
-        worker.signals.error.connect(has_failed)
-        QThreadPool.globalInstance().start(worker)
+        fetch.signals.finished.connect(after_fetch)
+        fetch.signals.error.connect(fetch_failed)
+        QThreadPool.globalInstance().start(fetch)
 
     def _finish_branch_fetch() -> None:
         branch = str(bulk_meta.get("branch") or "")
         ok_count = bulk_meta["ok"]
-        skipped = int(bulk_meta.get("skipped") or 0)
         total = bulk_meta["total"]
+        failed = max(0, total - ok_count)
         landing_state["bulk_busy"] = False
         console_append(
-            f"  checkout+reset origin/{branch} done — {ok_count}/{total} ok, {skipped} skipped",
-            ok=ok_count + skipped == total,
+            f"  checkout+reset origin/{branch} done — {ok_count}/{total} ok"
+            + (f", {failed} failed" if failed else ""),
+            ok=failed == 0,
         )
         set_console_status("idle")
         _set_bulk_enabled(
@@ -1318,13 +1339,14 @@ def build_view(icons, ctx=None) -> QWidget:
         return f"{branch} · up to date"
 
     def _apply_remote_status(label, result: dict, path: str | None = None) -> None:
-        """Fill a card's branch pill; plain folders stay empty and hidden."""
+        """Fill a card's branch pill; plain folders stay as an empty reserved row."""
         try:
             if not result.get("is_repo"):
                 label.setText("")
-                label.hide()
-                if path:
-                    _relayout_card(path)
+                label.setProperty("state", "")
+                label.setToolTip("")
+                label.style().unpolish(label)
+                label.style().polish(label)
                 return
             text = _format_remote_status(result)
             ahead = int(result.get("ahead") or 0)
@@ -1340,9 +1362,6 @@ def build_view(icons, ctx=None) -> QWidget:
             label.setToolTip(text)
             label.style().unpolish(label)
             label.style().polish(label)
-            label.show()
-            if path:
-                _relayout_card(path)
         except RuntimeError:
             pass  # the card was rebuilt while the worker ran
 
@@ -1405,8 +1424,10 @@ def build_view(icons, ctx=None) -> QWidget:
             if label is not None:
                 try:
                     label.setText("")
-                    label.hide()
-                    _relayout_card(path)
+                    label.setProperty("state", "")
+                    label.setToolTip("")
+                    label.style().unpolish(label)
+                    label.style().polish(label)
                 except RuntimeError:
                     pass
 
@@ -1417,13 +1438,25 @@ def build_view(icons, ctx=None) -> QWidget:
     def refresh_all_statuses() -> None:
         """Kick off a status refresh for every non-demo card on the landing."""
         try:
+            gen = int(landing_state.get("status_gen") or 0)
+            paths: list[str] = []
             for i in range(favorites_list.count()):
                 item = favorites_list.item(i)
                 path = item.data(Qt.ItemDataRole.UserRole)
                 widget = favorites_list.itemWidget(item)
                 if widget is None or not path:
                     continue
-                refresh_card_status(path)
+                paths.append(path)
+            # Stagger starts so the UI stays scrollable while pills fill in.
+            for index, path in enumerate(paths):
+                QTimer.singleShot(
+                    index * 12,
+                    lambda p=path, g=gen: (
+                        refresh_card_status(p)
+                        if landing_state.get("status_gen") == g
+                        else None
+                    ),
+                )
         except RuntimeError:
             pass
 
@@ -1814,7 +1847,7 @@ def build_view(icons, ctx=None) -> QWidget:
             refresh_favorites()
 
     def _on_filter_changed() -> None:
-        refresh_favorites()
+        refresh_repo_cards()
         persist_timer.start()  # debounce while typing in the search field
 
     open_button.clicked.connect(choose_folder)

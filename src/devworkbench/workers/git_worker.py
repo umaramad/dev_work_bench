@@ -17,7 +17,8 @@ Operations:
     remote_status — branch + ahead/behind vs the upstream (local-only)
     reset       — ``git reset`` (soft; ``hard=True`` → ``--hard``)
     has_branch  — does local ``refs/heads/<name>`` exist? (name in args[0])
-    checkout    — ``git checkout <name>`` (name in args[0])
+    checkout    — ``git checkout <name>``; force and/or from remote tip
+                  (``args=(name, "force", "origin")`` → ``checkout -f -B name origin/name``)
 
 Signals contract: construct on the UI thread and retain until finished/error
 (see ``workers/base.py``).
@@ -117,8 +118,16 @@ class GitWorker(Worker):
             name = (self._args[0] if self._args else "").strip()
             if not name:
                 return {"ok": False, "output": "branch name required"}
-            # Optional force: args=(name, "force") — needed before hard-reset to remote
+            # Optional force: args=(name, "force")
+            # From remote tip: args=(name, "force", "origin") → checkout -f -B name origin/name
+            # Creates/resets the local branch to match the remote and discards local dirt.
             force = len(self._args) > 1 and str(self._args[1]).lower() in {"force", "-f", "true", "1"}
+            remote = (self._args[2] if len(self._args) > 2 else "").strip()
+            if remote:
+                start = f"{remote}/{name}"
+                if force:
+                    return self._git(("checkout", "-f", "-B", name, start))
+                return self._git(("checkout", "-B", name, start))
             if force:
                 return self._git(("checkout", "-f", name))
             return self._git(("checkout", name))
