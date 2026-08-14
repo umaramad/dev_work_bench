@@ -15,6 +15,7 @@ Let each repository group define an arbitrary list of git commands (Add, Commit 
 | Command model | Fully custom: label + command string |
 | Storage | Per-group lists; copy snapshot into other groups |
 | Placeholders | Optional `{{name}}`; one dialog per run, same values for all repos |
+| Commit message | Always prompted at run time via `{{message}}` — never hardcoded |
 | UI | **Actions ▾** dropdown (scales to N); Edit / Copy at menu bottom |
 | Bulk Fetch/Status/Reset | Keep existing bulk bar for v1 |
 | Flet | Unchanged |
@@ -67,9 +68,21 @@ Persist the seeded list immediately.
 ### Placeholders
 
 - Pattern: `{{identifier}}` where `identifier` is `[A-Za-z_][A-Za-z0-9_]*`.  
-- Before run: collect unique placeholders in order of first appearance; dialog with one field each (Commit’s `message` is multiline-friendly).  
+- Before run: collect unique placeholders in order of first appearance; dialog with one field each.  
 - Substitute into the command string for every repo in the run.  
-- Empty required field → cancel the run.
+- Empty required field → cancel the run (do not start the queue).
+
+### Commit message (required UX)
+
+Selecting **Commit** (seeded as `git commit -m "{{message}}"`) **must** open a prompt for the commit message every time — it is dynamic and must not be stored as a fixed string in the command.
+
+- Dialog title: **Commit message**  
+- Field: multiline text (preferred for longer messages); label `message`  
+- Confirm disabled until the field is non-empty (after strip)  
+- The entered text is substituted for `{{message}}` and used for **all** repos in the group for that run only  
+- The message is **not** persisted as a default for the next run  
+
+Any custom action that includes `{{message}}` (or other `{{…}}` tokens) uses the same prompt flow.
 
 ## Edit actions… (current group)
 
@@ -125,6 +138,6 @@ Timeout: generous (e.g. 120s) to cover `push`.
 
 - Actions menu shows per-group commands; seed works.  
 - Edit + Copy dialogs persist correctly.  
-- Placeholder dialog works for Commit across the group.  
+- Placeholder dialog works for **Commit**: each run asks for a commit message; that value is applied to every repo in the group.  
 - Add / Commit / Push (and custom commands) run sequentially with card + console feedback.  
 - Branch Checkout & reset and existing bulk bar still work.
