@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import uuid
 
 from PySide6.QtCore import QSize, QThreadPool, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QTextCursor
@@ -36,13 +38,21 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from devworkbench.models.persistence import Favorite
 from devworkbench.modules.base import Module
-from devworkbench.modules.git.dialog import GroupManagerDialog, RepoDialog, ScanReposDialog
+from devworkbench.modules.git.dialog import (
+    ActionPlaceholdersDialog,
+    CopyGroupActionsDialog,
+    EditGroupActionsDialog,
+    GroupManagerDialog,
+    RepoDialog,
+    ScanReposDialog,
+)
 from devworkbench.ui.samples import GIT_REPOS
 from devworkbench.ui.theme import current_colors
 from devworkbench.ui.widgets.common import button, clear_list_widget, icon_button, search_field, styled_label
@@ -53,6 +63,12 @@ logger = logging.getLogger("devworkbench.modules.git")
 # Fixed card row height keeps the favorites list scroll smooth while status
 # pills / toasts update (no per-update sizeHint thrashing).
 _CARD_ROW_HEIGHT = 118
+_PLACEHOLDER_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+_DEFAULT_GROUP_ACTIONS = (
+    ("Add", "git add ."),
+    ("Commit", 'git commit -m "{{message}}"'),
+    ("Push", "git push"),
+)
 
 
 def _bump_font(widget, delta: int = 2, min_pt: int = 13, *, bold: bool | None = None) -> None:
@@ -201,6 +217,15 @@ def build_view(icons, ctx=None) -> QWidget:
     )
     _bump_font(branch_fetch, 2, 13)
     branch_layout.addWidget(branch_fetch)
+    actions_button = QToolButton()
+    actions_button.setObjectName("groupActionsButton")
+    actions_button.setText("Actions")
+    actions_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    actions_button.setToolTip("Run a custom git command across every repo in this group")
+    _bump_font(actions_button, 2, 13)
+    actions_menu = QMenu(actions_button)
+    actions_button.setMenu(actions_menu)
+    branch_layout.addWidget(actions_button)
     branch_edit = button("Edit branches…", "ghost")
     branch_edit.setObjectName("branchEditButton")
     branch_edit.setToolTip("Configure the shared list of branch names")
@@ -496,11 +521,17 @@ def build_view(icons, ctx=None) -> QWidget:
         branch_fetch.setEnabled(enabled and bool(branch_combo.currentText().strip()))
         branch_combo.setEnabled(not landing_state["bulk_busy"])
         branch_edit.setEnabled(not landing_state["bulk_busy"])
+        actions_button.setEnabled(
+            enabled
+            and landing_state["group"] not in (None, "__demo__")
+            and not landing_state["bulk_busy"]
+        )
         if landing_state["bulk_busy"]:
             bulk_busy_label.setText("Running…")
             bulk_busy_label.show()
         else:
             bulk_busy_label.hide()
+        _refresh_actions_menu()
 
     def refresh_groups() -> None:
         """Rebuild the left group list and keep the current selection."""
@@ -1229,6 +1260,265 @@ def build_view(icons, ctx=None) -> QWidget:
         landing_state["bulk_busy"] = False
         console_append(
             f"  checkout+reset origin/{branch} done — {ok_count}/{total} ok"
+            + (f", {failed} failed" if failed else ""),
+            ok=failed == 0,
+        )
+        set_console_status("idle")
+        _set_bulk_enabled(
+            landing_state["group"] not in (None, "__demo__")
+            and bool(favorites_for_group())
+        )
+
+    # -------------------------------------------------------- group actions
+    def _load_group_actions_map() -> dict:
+        raw = "{}"
+        if service is not None:
+            try:
+                raw = str(service.get("git.home.group_actions") or "{}")
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_group_actions_map(data: dict) -> None:
+        if service is None:
+            return
+        try:
+            service.set("git.home.group_actions", json.dumps(data))
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to save git.home.group_actions")
+
+    def _normalize_action(action: dict) -> dict:
+        return {
+            "id": str(action.get("id") or "") or str(uuid.uuid4()),
+            "label": str(action.get("label") or "").strip(),
+            "command": str(action.get("command") or "").strip(),
+        }
+
+    def _seed_actions() -> list[dict]:
+        return [
+            {"id": str(uuid.uuid4()), "label": label, "command": command}
+            for label, command in _DEFAULT_GROUP_ACTIONS
+        ]
+
+    def _actions_for_group(group: str | None, *, seed: bool = True) -> list[dict]:
+        if group is None or group == "__demo__":
+            return []
+        key = group
+        data = _load_group_actions_map()
+        if key not in data or not isinstance(data.get(key), list) or not data.get(key):
+            if not seed:
+                return []
+            seeded = _seed_actions()
+            data[key] = seeded
+            _save_group_actions_map(data)
+            return [dict(item) for item in seeded]
+        return [_normalize_action(item) for item in data[key] if isinstance(item, dict)]
+
+    def _set_actions_for_group(group: str, actions: list[dict]) -> None:
+        data = _load_group_actions_map()
+        data[group] = [_normalize_action(item) for item in actions]
+        _save_group_actions_map(data)
+
+    def _placeholder_names(command: str) -> list[str]:
+        names: list[str] = []
+        for match in _PLACEHOLDER_RE.finditer(command or ""):
+            name = match.group(1)
+            if name not in names:
+                names.append(name)
+        return names
+
+    def _substitute_placeholders(command: str, values: dict[str, str]) -> str:
+        def repl(match: re.Match) -> str:
+            return values.get(match.group(1), match.group(0))
+
+        return _PLACEHOLDER_RE.sub(repl, command or "")
+
+    def _refresh_actions_menu() -> None:
+        actions_menu.clear()
+        group = landing_state["group"]
+        if group in (None, "__demo__") or landing_state["bulk_busy"]:
+            return
+        for action in _actions_for_group(group):
+            label = action["label"]
+            act = actions_menu.addAction(label)
+            act.triggered.connect(
+                lambda _checked=False, a=dict(action): run_group_action(a)
+            )
+        actions_menu.addSeparator()
+        edit_act = actions_menu.addAction("Edit actions…")
+        edit_act.triggered.connect(_edit_group_actions_dialog)
+        copy_act = actions_menu.addAction("Copy actions to groups…")
+        copy_act.triggered.connect(_copy_group_actions_dialog)
+        counts = section_counts()
+        targets = [g for g in sorted(counts, key=lambda x: (x == "", x.casefold())) if g != group]
+        copy_act.setEnabled(bool(targets) and bool(_actions_for_group(group)))
+
+    def _edit_group_actions_dialog() -> None:
+        group = landing_state["group"]
+        if group in (None, "__demo__"):
+            return
+        dialog = EditGroupActionsDialog(
+            root,
+            group_name=group,
+            actions=_actions_for_group(group),
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            _set_actions_for_group(group, dialog.result_actions())
+            _refresh_actions_menu()
+
+    def _copy_group_actions_dialog() -> None:
+        group = landing_state["group"]
+        if group in (None, "__demo__") or favorites_repo is None:
+            return
+        actions = _actions_for_group(group)
+        counts = section_counts()
+        targets = tuple(
+            g for g in sorted(counts, key=lambda x: (x == "", x.casefold())) if g != group
+        )
+        if not targets:
+            console_append("  · no other groups to copy into", ok=False)
+            return
+        dialog = CopyGroupActionsDialog(
+            root,
+            source_group=group,
+            actions=actions,
+            target_groups=targets,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_actions()
+        data = _load_group_actions_map()
+        copied = 0
+        skipped = 0
+        for target in dialog.selected_groups():
+            existing = [
+                _normalize_action(item)
+                for item in (data.get(target) or [])
+                if isinstance(item, dict)
+            ]
+            labels = {(item.get("label") or "").casefold() for item in existing}
+            for action in selected:
+                label = str(action.get("label") or "").strip()
+                if not label:
+                    continue
+                if label.casefold() in labels:
+                    skipped += 1
+                    continue
+                existing.append(
+                    _normalize_action({
+                        "id": str(uuid.uuid4()),
+                        "label": label,
+                        "command": str(action.get("command") or "").strip(),
+                    })
+                )
+                labels.add(label.casefold())
+                copied += 1
+            data[target] = existing
+        _save_group_actions_map(data)
+        console_append(
+            f"  copied {copied} action(s)"
+            + (f", skipped {skipped} duplicate label(s)" if skipped else ""),
+            ok=True,
+        )
+
+    def run_group_action(action: dict) -> None:
+        """Run one custom action across every repo in the selected group."""
+        if landing_state["bulk_busy"]:
+            return
+        group = landing_state["group"]
+        if group in (None, "__demo__"):
+            return
+        label = str(action.get("label") or "Action").strip() or "Action"
+        command = str(action.get("command") or "").strip()
+        if not command:
+            console_append(f"  · “{label}” has an empty command", ok=False)
+            return
+        members = favorites_for_group()
+        if not members:
+            console_append("  · no repositories in this group", ok=False)
+            return
+
+        placeholders = _placeholder_names(command)
+        values: dict[str, str] = {}
+        if placeholders:
+            dialog = ActionPlaceholdersDialog(
+                root, action_label=label, placeholders=placeholders
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            values = dialog.values()
+        resolved = _substitute_placeholders(command, values)
+
+        paths = [favorite.ref for favorite in members]
+        landing_state["bulk_busy"] = True
+        bulk_queue[:] = list(paths)
+        bulk_meta.update({
+            "op": "group_action",
+            "label": label,
+            "command": resolved,
+            "done": 0,
+            "total": len(paths),
+            "ok": 0,
+        })
+        _set_bulk_enabled(False)
+        console_append(f"$ {resolved} — {len(paths)} repos in {group or 'Ungrouped'}")
+        set_console_status(f"{label} 0/{len(paths)}…")
+        _run_next_group_action()
+
+    def _run_next_group_action() -> None:
+        if not bulk_queue:
+            _finish_group_action()
+            return
+        label = str(bulk_meta.get("label") or "Action")
+        command = str(bulk_meta.get("command") or "")
+        path = bulk_queue.pop(0)
+        bulk_meta["done"] += 1
+        set_console_status(f"{label} {bulk_meta['done']}/{bulk_meta['total']}…")
+        console_append(f"$ {command} — {path}")
+        _set_card_op_status(path, f"{label}…")
+
+        worker = GitWorker("run_cmd", path, args=(command,), executable=git_exe())
+        bulk_workers.append(worker)
+
+        def done(result, current=worker, p=path, op_label=label) -> None:
+            if current in bulk_workers:
+                bulk_workers.remove(current)
+            ok = bool(isinstance(result, dict) and result.get("ok"))
+            output = str((result or {}).get("output") or "").strip() if isinstance(result, dict) else ""
+            summary = next((line.strip() for line in output.splitlines() if line.strip()), "ok" if ok else "failed")
+            console_append(f"  {'✓' if ok else '✕'} {summary[:200]}", ok=ok)
+            if ok:
+                bulk_meta["ok"] += 1
+                _set_card_op_status(p, f"{op_label} · ok", ok=True)
+            else:
+                _set_card_op_status(p, f"{op_label} failed — {summary[:100]}", ok=False)
+            refresh_card_status(p)
+            _run_next_group_action()
+
+        def failed(exc, current=worker, p=path, op_label=label) -> None:
+            if current in bulk_workers:
+                bulk_workers.remove(current)
+            err = str(exc)
+            console_append(f"  ✕ {err}", ok=False)
+            _set_card_op_status(p, f"{op_label} failed — {err[:100]}", ok=False)
+            _run_next_group_action()
+
+        worker.signals.finished.connect(done)
+        worker.signals.error.connect(failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _finish_group_action() -> None:
+        label = str(bulk_meta.get("label") or "Action")
+        ok_count = bulk_meta["ok"]
+        total = bulk_meta["total"]
+        failed = max(0, total - ok_count)
+        landing_state["bulk_busy"] = False
+        console_append(
+            f"  {label} done — {ok_count}/{total} ok"
             + (f", {failed} failed" if failed else ""),
             ok=failed == 0,
         )

@@ -19,6 +19,7 @@ Operations:
     has_branch  — does local ``refs/heads/<name>`` exist? (name in args[0])
     checkout    — ``git checkout <name>``; force and/or from remote tip
                   (``args=(name, "force", "origin")`` → ``checkout -f -B name origin/name``)
+    run_cmd     — run a parsed ``git …`` command string (args[0]); git-only for safety
 
 Signals contract: construct on the UI thread and retain until finished/error
 (see ``workers/base.py``).
@@ -27,6 +28,7 @@ Signals contract: construct on the UI thread and retain until finished/error
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 
 from devworkbench.workers.base import Worker
@@ -52,6 +54,7 @@ _TIME_OUTPUT = {  # seconds per operation class
     "reset": 60,
     "has_branch": 15,
     "checkout": 30,
+    "run_cmd": 120,
 }
 
 
@@ -131,6 +134,20 @@ class GitWorker(Worker):
             if force:
                 return self._git(("checkout", "-f", name))
             return self._git(("checkout", name))
+        if op == "run_cmd":
+            raw = (self._args[0] if self._args else "").strip()
+            if not raw:
+                return {"ok": False, "output": "empty command"}
+            try:
+                argv = shlex.split(raw)
+            except ValueError as exc:
+                return {"ok": False, "output": f"parse error: {exc}"}
+            if not argv:
+                return {"ok": False, "output": "empty command"}
+            if argv[0] != "git":
+                return {"ok": False, "output": "only git commands are allowed (must start with git)"}
+            # Drop the literal "git" token; _git prefixes the configured executable.
+            return self._git(tuple(argv[1:]))
         raise ValueError(f"unknown git operation {op!r}")
 
     # -- operations ---------------------------------------------------------------

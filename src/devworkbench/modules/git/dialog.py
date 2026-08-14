@@ -15,16 +15,23 @@ import os
 
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QPlainTextEdit,
     QPushButton,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -729,3 +736,293 @@ class ScanReposDialog(QDialog):
         self.added = added
         if added or self._repo is None:
             self.accept()
+
+
+class EditGroupActionsDialog(QDialog):
+    """Edit the custom Actions list for one repository group."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        group_name: str,
+        actions: list[dict],
+    ) -> None:
+        super().__init__(parent)
+        self._group_name = group_name
+        self.setWindowTitle(f"Edit actions — {group_name or 'Ungrouped'}")
+        self.setMinimumSize(560, 360)
+        self._actions = [dict(item) for item in actions]
+        self._build()
+
+    def _build(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        hint = QLabel(
+            "Each action appears in the Actions menu for this group. "
+            "Use {{name}} placeholders for prompts (same value for every repo). "
+            'Example: git commit -m "{{message}}"'
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Label", "Command"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, 1)
+
+        row = QHBoxLayout()
+        add_btn = button("Add", "ghost")
+        remove_btn = button("Remove", "ghost")
+        up_btn = button("Move up", "ghost")
+        down_btn = button("Move down", "ghost")
+        add_btn.clicked.connect(self._add_row)
+        remove_btn.clicked.connect(self._remove_row)
+        up_btn.clicked.connect(lambda: self._move_row(-1))
+        down_btn.clicked.connect(lambda: self._move_row(1))
+        row.addWidget(add_btn)
+        row.addWidget(remove_btn)
+        row.addWidget(up_btn)
+        row.addWidget(down_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self.error = styled_label("", "hint")
+        self.error.hide()
+        layout.addWidget(self.error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        for action in self._actions:
+            self._append_row(
+                str(action.get("label") or ""),
+                str(action.get("command") or ""),
+                str(action.get("id") or ""),
+            )
+
+    def _append_row(self, label: str, command: str, action_id: str = "") -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        label_item = QTableWidgetItem(label)
+        label_item.setData(Qt.ItemDataRole.UserRole, action_id)
+        self.table.setItem(row, 0, label_item)
+        self.table.setItem(row, 1, QTableWidgetItem(command))
+
+    def _add_row(self) -> None:
+        self._append_row("New action", "git status", "")
+        self.table.selectRow(self.table.rowCount() - 1)
+
+    def _remove_row(self) -> None:
+        row = self.table.currentRow()
+        if row >= 0:
+            self.table.removeRow(row)
+
+    def _move_row(self, delta: int) -> None:
+        row = self.table.currentRow()
+        target = row + delta
+        if row < 0 or target < 0 or target >= self.table.rowCount():
+            return
+        label_item = self.table.item(row, 0)
+        cmd_item = self.table.item(row, 1)
+        label = label_item.text() if label_item else ""
+        action_id = str(label_item.data(Qt.ItemDataRole.UserRole) or "") if label_item else ""
+        command = cmd_item.text() if cmd_item else ""
+        self.table.removeRow(row)
+        self.table.insertRow(target)
+        new_label = QTableWidgetItem(label)
+        new_label.setData(Qt.ItemDataRole.UserRole, action_id)
+        self.table.setItem(target, 0, new_label)
+        self.table.setItem(target, 1, QTableWidgetItem(command))
+        self.table.selectRow(target)
+
+    def _save(self) -> None:
+        actions: list[dict] = []
+        for row in range(self.table.rowCount()):
+            label_item = self.table.item(row, 0)
+            cmd_item = self.table.item(row, 1)
+            label = (label_item.text() if label_item else "").strip()
+            command = (cmd_item.text() if cmd_item else "").strip()
+            if not label or not command:
+                self.error.setText("Every row needs a non-empty label and command.")
+                self.error.show()
+                return
+            action_id = str(label_item.data(Qt.ItemDataRole.UserRole) or "") if label_item else ""
+            actions.append({"id": action_id, "label": label, "command": command})
+        self._result = actions
+        self.accept()
+
+    def result_actions(self) -> list[dict]:
+        return list(getattr(self, "_result", []))
+
+
+class CopyGroupActionsDialog(QDialog):
+    """Copy selected actions from the current group into other groups."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        source_group: str,
+        actions: list[dict],
+        target_groups: tuple[str, ...],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Copy actions to groups")
+        self.setMinimumSize(480, 400)
+        self._actions = list(actions)
+        self._build(source_group, target_groups)
+
+    def _build(self, source_group: str, target_groups: tuple[str, ...]) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        layout.addWidget(
+            styled_label(
+                f"Copy from “{source_group or 'Ungrouped'}”. "
+                "Duplicate labels on a target are skipped.",
+                "hint",
+            )
+        )
+
+        layout.addWidget(QLabel("Actions to copy"))
+        self.action_list = QListWidget()
+        self.action_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        for action in self._actions:
+            item = QListWidgetItem(str(action.get("label") or "(unnamed)"))
+            item.setData(Qt.ItemDataRole.UserRole, action)
+            self.action_list.addItem(item)
+        for i in range(self.action_list.count()):
+            self.action_list.item(i).setSelected(True)
+        layout.addWidget(self.action_list, 1)
+
+        layout.addWidget(QLabel("Target groups"))
+        self.group_list = QListWidget()
+        self.group_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        for group in target_groups:
+            item = QListWidgetItem(group or "Ungrouped")
+            item.setData(Qt.ItemDataRole.UserRole, group)
+            self.group_list.addItem(item)
+        layout.addWidget(self.group_list, 1)
+
+        self.error = styled_label("", "hint")
+        self.error.hide()
+        layout.addWidget(self.error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        selected_actions = [
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self.action_list.selectedItems()
+        ]
+        selected_groups = [
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self.group_list.selectedItems()
+        ]
+        if not selected_actions:
+            self.error.setText("Select at least one action.")
+            self.error.show()
+            return
+        if not selected_groups:
+            self.error.setText("Select at least one target group.")
+            self.error.show()
+            return
+        self._selected_actions = selected_actions
+        self._selected_groups = selected_groups
+        self.accept()
+
+    def selected_actions(self) -> list[dict]:
+        return list(getattr(self, "_selected_actions", []))
+
+    def selected_groups(self) -> list[str]:
+        return list(getattr(self, "_selected_groups", []))
+
+
+class ActionPlaceholdersDialog(QDialog):
+    """Collect values for {{placeholder}} tokens before a group action run."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        action_label: str,
+        placeholders: list[str],
+    ) -> None:
+        super().__init__(parent)
+        title = "Commit message" if placeholders == ["message"] else f"Values for {action_label}"
+        self.setWindowTitle(title)
+        self.setMinimumWidth(420)
+        self._placeholders = list(placeholders)
+        self._fields: dict[str, QWidget] = {}
+        self._build(action_label)
+
+    def _build(self, action_label: str) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        intro = QLabel(
+            f"Enter values for “{action_label}”. "
+            "The same values are used for every repository in the group."
+        )
+        intro.setObjectName("hint")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        for name in self._placeholders:
+            if name == "message":
+                field = QPlainTextEdit()
+                field.setPlaceholderText("Commit message")
+                field.setFixedHeight(100)
+            else:
+                field = QLineEdit()
+                field.setPlaceholderText(name)
+            self._fields[name] = field
+            form.addRow(name, field)
+        layout.addLayout(form)
+
+        self.error = styled_label("", "hint")
+        self.error.hide()
+        layout.addWidget(self.error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        values: dict[str, str] = {}
+        for name, field in self._fields.items():
+            if isinstance(field, QPlainTextEdit):
+                text = field.toPlainText().strip()
+            else:
+                text = field.text().strip()
+            if not text:
+                self.error.setText(f"“{name}” is required.")
+                self.error.show()
+                return
+            values[name] = text
+        self._values = values
+        self.accept()
+
+    def values(self) -> dict[str, str]:
+        return dict(getattr(self, "_values", {}))
