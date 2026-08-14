@@ -30,7 +30,9 @@ dependencies = [
 [project.optional-dependencies]
 # Runtime extras (graceful degradation when absent).
 yaml = ["PyYAML>=6.0"]
-# Flet UI (migration target — a separate shell; requires Python >= 3.10).
+# Flet UI (migration target — a separate shell).
+# Requires Python >= 3.10: flet 0.80+ dropped 3.9; 0.28.x is API-incompatible
+# with this codebase. On 3.9 use the PySide6 shell instead.
 flet = ["flet>=0.86"]
 # Development / QA.
 dev = ["ruff>=0.5", "pytest>=8", "mypy>=1.10,<2"]  # <2: mypy 2.x dropped the Python 3.9 target used in [tool.mypy]

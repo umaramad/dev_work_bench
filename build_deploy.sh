@@ -53,6 +53,8 @@ require_pyinstaller() {
 }
 
 require_flet() {
+    "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
+        || die "Flet UI needs Python 3.10+ (venv is $($PYTHON -V 2>&1)). Recreate with: /opt/homebrew/bin/python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e '.[flet]'"
     "$PYTHON" -c "import flet" 2>/dev/null || die "Flet missing — run: .venv/bin/python -m pip install -e '.[flet]'"
 }
 

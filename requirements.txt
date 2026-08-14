@@ -13,7 +13,9 @@ tomli>=2.0; python_version < "3.11"
 # --- Optional runtime extras (pyproject.toml [project.optional-dependencies].yaml) ---
 # PyYAML enables semantic YAML comparison; missing -> text fallback.
 PyYAML>=6.0
-# Flet UI (migration target — a separate shell; requires Python >= 3.10).
+# Flet UI (migration target — a separate shell).
+# Requires Python >= 3.10 (flet 0.80+). Skipped automatically on 3.9 —
+# use PySide6 there, or recreate the venv with Homebrew Python 3.12+.
 # Install with: pip install -e ".[flet]"
 flet>=0.86; python_version >= "3.10"
 

@@ -23,6 +23,26 @@ import logging
 import sys
 from pathlib import Path
 
+# Flet 0.80+ (and this UI) need Python 3.10+. The last Flet that supported
+# 3.9 was 0.28.x — a different API — so we refuse early instead of failing
+# on a missing/uninstallable package under system Python 3.9.6.
+_MIN_FLET_PYTHON = (3, 10)
+if sys.version_info < _MIN_FLET_PYTHON:
+    _ver = ".".join(map(str, sys.version_info[:3]))
+    sys.stderr.write(
+        f"DevWorkbench Flet UI requires Python {_MIN_FLET_PYTHON[0]}.{_MIN_FLET_PYTHON[1]}+\n"
+        f"(current interpreter: {_ver}).\n\n"
+        "Recreate the venv with a newer Python, then reinstall:\n"
+        "  /opt/homebrew/bin/python3.14 -m venv .venv\n"
+        "  .venv/bin/python -m pip install -U pip\n"
+        "  .venv/bin/python -m pip install -r requirements.txt\n"
+        "  .venv/bin/python -m pip install -e '.[flet]'\n"
+        "  .venv/bin/python main.py\n\n"
+        "Or run the PySide6 UI on Python 3.9:\n"
+        "  PYTHONPATH=src python3 -m devworkbench\n"
+    )
+    raise SystemExit(1)
+
 # src-layout bootstrap: make ``devworkbench`` importable when running the
 # script straight from a checkout (mirrors pytest's pythonpath=src).
 # When frozen (flet pack / PyInstaller) the package is already bundled — skip.
@@ -31,7 +51,15 @@ if not getattr(sys, "frozen", False):
     if _SRC.is_dir() and str(_SRC) not in sys.path:
         sys.path.insert(0, str(_SRC))
 
-import flet as ft  # noqa: E402
+try:
+    import flet as ft  # noqa: E402
+except ModuleNotFoundError:
+    sys.stderr.write(
+        "Flet is not installed in this environment.\n"
+        "  .venv/bin/python -m pip install -e '.[flet]'\n"
+        "Then run:  .venv/bin/python main.py\n"
+    )
+    raise SystemExit(1) from None
 
 from devworkbench import APP_NAME  # noqa: E402
 from devworkbench.core.events import EventBus  # noqa: E402

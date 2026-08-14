@@ -81,7 +81,8 @@ Open **`docs/ui/gallery.html`** in a browser to browse all screens.
 ### Prerequisites
 
 - **macOS** (arm64 or x86_64)
-- **Python 3.9+** ([python.org](https://www.python.org/downloads/) or `brew install python@3.12` — any 3.9–3.14 works)
+- **Python 3.9+** for the PySide6 UI (`python -m devworkbench`)
+- **Python 3.10+** for the Flet UI (`python main.py` / `./build_deploy.sh local`) — Flet 0.86 does not support 3.9. Prefer Homebrew Python when creating the venv, e.g. `/opt/homebrew/bin/python3.14 -m venv .venv` (macOS system `/usr/bin/python3` is often 3.9.6)
 
 ### 1. Set up the virtual environment
 
