@@ -117,6 +117,10 @@ class GitWorker(Worker):
             name = (self._args[0] if self._args else "").strip()
             if not name:
                 return {"ok": False, "output": "branch name required"}
+            # Optional force: args=(name, "force") — needed before hard-reset to remote
+            force = len(self._args) > 1 and str(self._args[1]).lower() in {"force", "-f", "true", "1"}
+            if force:
+                return self._git(("checkout", "-f", name))
             return self._git(("checkout", name))
         raise ValueError(f"unknown git operation {op!r}")
 
