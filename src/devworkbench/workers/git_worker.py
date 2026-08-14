@@ -97,14 +97,22 @@ class GitWorker(Worker):
         if op == "remote_status":
             return self._remote_status()
         if op == "reset":
-            hard = bool(self._args and self._args[0] == "hard")
-            return self._git(("reset", "--hard") if hard else ("reset",))
+            # args: () soft reset; ("hard",) hard HEAD; ("hard", "origin/main") hard to ref
+            if self._args and self._args[0] == "hard":
+                target = self._args[1] if len(self._args) > 1 else None
+                if target:
+                    return self._git(("reset", "--hard", str(target)))
+                return self._git(("reset", "--hard"))
+            return self._git(("reset",))
         if op == "has_branch":
             name = (self._args[0] if self._args else "").strip()
             if not name:
                 return {"ok": False, "exists": False, "output": "branch name required"}
-            result = self._git(("show-ref", "--verify", "--quiet", f"refs/heads/{name}"))
-            return {"ok": True, "exists": bool(result["ok"]), "output": result["output"]}
+            # Optional remote: args=("feature", "origin") → refs/remotes/origin/feature
+            remote = (self._args[1] if len(self._args) > 1 else "").strip()
+            ref = f"refs/remotes/{remote}/{name}" if remote else f"refs/heads/{name}"
+            result = self._git(("show-ref", "--verify", "--quiet", ref))
+            return {"ok": True, "exists": bool(result["ok"]), "output": result["output"], "ref": ref}
         if op == "checkout":
             name = (self._args[0] if self._args else "").strip()
             if not name:

@@ -164,11 +164,14 @@ def build_view(icons, ctx=None) -> QWidget:
     branch_combo = QComboBox()
     branch_combo.setObjectName("branchCombo")
     branch_combo.setMinimumWidth(160)
-    branch_combo.setToolTip("Shared branch list — used for Fetch branch across this group")
+    branch_combo.setToolTip("Shared branch list — used for Checkout & reset across this group")
     branch_layout.addWidget(branch_combo, 1)
-    branch_fetch = button("Fetch branch", "primary")
+    branch_fetch = button("Checkout & reset", "primary")
     branch_fetch.setObjectName("branchFetchButton")
-    branch_fetch.setToolTip("Checkout this branch in each repo (skip if missing), then fetch")
+    branch_fetch.setToolTip(
+        "In each repo: checkout this branch (skip if missing locally), fetch, "
+        "then hard-reset to origin/<branch>"
+    )
     branch_layout.addWidget(branch_fetch)
     branch_edit = button("Edit branches…", "ghost")
     branch_edit.setObjectName("branchEditButton")
@@ -967,7 +970,7 @@ def build_view(icons, ctx=None) -> QWidget:
         dialog.exec()
 
     def run_branch_fetch() -> None:
-        """Checkout the selected branch (skip if missing), then fetch — per group repo."""
+        """Checkout selected branch, fetch, hard-reset to origin/<branch> — per group repo."""
         if landing_state["bulk_busy"]:
             return
         branch = branch_combo.currentText().strip()
@@ -983,7 +986,7 @@ def build_view(icons, ctx=None) -> QWidget:
         landing_state["bulk_busy"] = True
         bulk_queue[:] = list(paths)
         bulk_meta.update({
-            "op": "branch_fetch",
+            "op": "branch_reset",
             "branch": branch,
             "done": 0,
             "total": len(paths),
@@ -992,9 +995,9 @@ def build_view(icons, ctx=None) -> QWidget:
         })
         _set_bulk_enabled(False)
         console_append(
-            f"$ checkout+fetch {branch} — {len(paths)} repos in {group or 'Ungrouped'}"
+            f"$ checkout+reset origin/{branch} — {len(paths)} repos in {group or 'Ungrouped'}"
         )
-        set_console_status(f"branch 0/{len(paths)}…")
+        set_console_status(f"reset 0/{len(paths)}…")
         _run_next_branch_fetch()
 
     def _run_next_branch_fetch() -> None:
@@ -1002,9 +1005,10 @@ def build_view(icons, ctx=None) -> QWidget:
             _finish_branch_fetch()
             return
         branch = str(bulk_meta.get("branch") or "")
+        remote_ref = f"origin/{branch}"
         path = bulk_queue.pop(0)
         bulk_meta["done"] += 1
-        set_console_status(f"branch {bulk_meta['done']}/{bulk_meta['total']}…")
+        set_console_status(f"reset {bulk_meta['done']}/{bulk_meta['total']}…")
         console_append(f"$ has_branch {branch} — {path}")
         _set_card_op_status(path, f"Checking {branch}…")
 
@@ -1032,7 +1036,10 @@ def build_view(icons, ctx=None) -> QWidget:
                 cok = bool(isinstance(cres, dict) and cres.get("ok"))
                 cout = str((cres or {}).get("output") or "").strip() if isinstance(cres, dict) else ""
                 if not cok:
-                    console_append(f"  ✕ checkout failed: {(cout.splitlines() or ['failed'])[0][:160]}", ok=False)
+                    console_append(
+                        f"  ✕ checkout failed: {(cout.splitlines() or ['failed'])[0][:160]}",
+                        ok=False,
+                    )
                     _set_card_op_status(cp, f"Checkout {cb} failed", ok=False)
                     _run_next_branch_fetch()
                     return
@@ -1047,14 +1054,77 @@ def build_view(icons, ctx=None) -> QWidget:
                     fok = bool(isinstance(fres, dict) and fres.get("ok"))
                     fout = str((fres or {}).get("output") or "").strip() if isinstance(fres, dict) else ""
                     summary = (fout.splitlines() or ["ok" if fok else "failed"])[0]
-                    console_append(f"  {'✓' if fok else '✕'} {summary[:200]}", ok=fok)
-                    if fok:
-                        bulk_meta["ok"] += 1
-                        _set_card_op_status(fp, f"{fb} · fetched", ok=True)
-                        refresh_card_status(fp)
-                    else:
+                    console_append(f"  {'✓' if fok else '✕'} fetch: {summary[:180]}", ok=fok)
+                    if not fok:
                         _set_card_op_status(fp, "Fetch failed", ok=False)
-                    _run_next_branch_fetch()
+                        _run_next_branch_fetch()
+                        return
+                    # Confirm origin/<branch> exists before hard reset.
+                    console_append(f"$ has_remote origin/{fb} — {fp}")
+                    remote_check = GitWorker(
+                        "has_branch", fp, args=(fb, "origin"), executable=git_exe()
+                    )
+                    bulk_workers.append(remote_check)
+
+                    def after_remote(rres, rworker=remote_check, rp=fp, rb=fb) -> None:
+                        if rworker in bulk_workers:
+                            bulk_workers.remove(rworker)
+                        rexists = bool(isinstance(rres, dict) and rres.get("exists"))
+                        if not rexists:
+                            bulk_meta["skipped"] = int(bulk_meta.get("skipped") or 0) + 1
+                            console_append(f"  · skip reset — no origin/{rb}", ok=None)
+                            _set_card_op_status(rp, f"No origin/{rb}", ok=False)
+                            refresh_card_status(rp)
+                            _run_next_branch_fetch()
+                            return
+                        target = f"origin/{rb}"
+                        console_append(f"$ git reset --hard {target} — {rp}")
+                        _set_card_op_status(rp, f"Reset {target}…")
+                        reset = GitWorker(
+                            "reset", rp, args=("hard", target), executable=git_exe()
+                        )
+                        bulk_workers.append(reset)
+
+                        def after_reset(zres, zworker=reset, zp=rp, zb=rb) -> None:
+                            if zworker in bulk_workers:
+                                bulk_workers.remove(zworker)
+                            zok = bool(isinstance(zres, dict) and zres.get("ok"))
+                            zout = (
+                                str((zres or {}).get("output") or "").strip()
+                                if isinstance(zres, dict)
+                                else ""
+                            )
+                            zsum = (zout.splitlines() or ["ok" if zok else "failed"])[0]
+                            console_append(f"  {'✓' if zok else '✕'} {zsum[:200]}", ok=zok)
+                            if zok:
+                                bulk_meta["ok"] += 1
+                                _set_card_op_status(zp, f"{zb} · reset to origin", ok=True)
+                                refresh_card_status(zp)
+                            else:
+                                _set_card_op_status(zp, "Reset failed", ok=False)
+                            _run_next_branch_fetch()
+
+                        def reset_failed(exc, zworker=reset, zp=rp) -> None:
+                            if zworker in bulk_workers:
+                                bulk_workers.remove(zworker)
+                            console_append(f"  ✕ {exc}", ok=False)
+                            _set_card_op_status(zp, "Reset failed", ok=False)
+                            _run_next_branch_fetch()
+
+                        reset.signals.finished.connect(after_reset)
+                        reset.signals.error.connect(reset_failed)
+                        QThreadPool.globalInstance().start(reset)
+
+                    def remote_failed(exc, rworker=remote_check, rp=fp) -> None:
+                        if rworker in bulk_workers:
+                            bulk_workers.remove(rworker)
+                        console_append(f"  ✕ {exc}", ok=False)
+                        _set_card_op_status(rp, "Remote check failed", ok=False)
+                        _run_next_branch_fetch()
+
+                    remote_check.signals.finished.connect(after_remote)
+                    remote_check.signals.error.connect(remote_failed)
+                    QThreadPool.globalInstance().start(remote_check)
 
                 def fetch_failed(exc, fworker=fetch, fp=p) -> None:
                     if fworker in bulk_workers:
@@ -1096,7 +1166,7 @@ def build_view(icons, ctx=None) -> QWidget:
         total = bulk_meta["total"]
         landing_state["bulk_busy"] = False
         console_append(
-            f"  branch {branch} done — {ok_count}/{total} ok, {skipped} skipped",
+            f"  checkout+reset origin/{branch} done — {ok_count}/{total} ok, {skipped} skipped",
             ok=ok_count + skipped == total,
         )
         set_console_status("idle")
