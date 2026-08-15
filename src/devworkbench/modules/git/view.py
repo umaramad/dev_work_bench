@@ -20,7 +20,7 @@ import time
 import uuid
 from typing import Any
 
-from PySide6.QtCore import QRectF, QSize, QThreadPool, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, QThreadPool, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTabBar,
@@ -64,14 +66,27 @@ from devworkbench.workers.git_worker import GitWorker
 
 logger = logging.getLogger("devworkbench.modules.git")
 
-# Fixed card row height keeps the favorites list scroll smooth while status
-# pills / toasts update (no per-update sizeHint thrashing).
-_CARD_ROW_HEIGHT = 118
+# Fixed card size keeps the grid scroll smooth while status / toasts update
+# (no per-update sizeHint thrashing). Width is recomputed on viewport resize
+# for a 1–2 column IconMode grid.
+_CARD_HEIGHT = 186
+_CARD_MIN_WIDTH = 280
 # Cards materialized per batch on the landing. The full filtered member list
 # lives in ``landing_state["members"]``; only this many card widgets exist at
 # a time, and scrolling near the bottom loads the next batch (lazy
 # pagination for very large groups).
 _LANDING_CHUNK = 80
+
+
+def _repo_initials(label: str) -> str:
+    """Two-letter avatar initials from a repo name or path basename."""
+    base = (label or "").strip() or "?"
+    parts = [p for p in re.split(r"[-_\s.]+", base) if p]
+    if len(parts) >= 2:
+        return (parts[0][:1] + parts[1][:1]).upper()
+    return base[:2].upper()
+
+
 _PLACEHOLDER_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 _DEFAULT_GROUP_ACTIONS = (
     ("Add", "git add ."),
@@ -360,8 +375,13 @@ def build_view(icons, ctx=None) -> QWidget:
     favorites_list = QListWidget()
     favorites_list.setObjectName("favoritesList")
     favorites_list.setFrameStyle(0)
-    favorites_list.setSpacing(6)
+    favorites_list.setSpacing(10)
     favorites_list.setUniformItemSizes(True)
+    favorites_list.setViewMode(QListWidget.ViewMode.IconMode)
+    favorites_list.setMovement(QListWidget.Movement.Static)
+    favorites_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+    favorites_list.setWrapping(True)
+    favorites_list.setWordWrap(False)
     favorites_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     favorites_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     favorites_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -451,112 +471,204 @@ def build_view(icons, ctx=None) -> QWidget:
     # Last known remote status per repo path, rendered onto fresh cards after
     # a rebuild; refreshed on demand, after each fetch and on a timer.
     status_cache: dict[str, dict] = {}
+    # Per-path epoch of the last successful remote-status fill (card footer).
+    status_times: dict[str, float] = {}
     status_workers: list = []
     bulk_workers: list = []
     bulk_queue: list = []  # remaining paths for the active bulk run
     bulk_meta = {"op": "", "done": 0, "total": 0, "ok": 0}
 
+    def _card_grid_size() -> QSize:
+        """Card size hint for the IconMode grid (1 col narrow, 2 cols wide)."""
+        viewport = favorites_list.viewport()
+        width = max(1, viewport.width() if viewport is not None else favorites_list.width())
+        spacing = max(0, favorites_list.spacing())
+        cols = 2 if width >= (_CARD_MIN_WIDTH * 2 + spacing * 3) else 1
+        usable = max(_CARD_MIN_WIDTH, width - spacing * (cols + 1))
+        card_w = max(_CARD_MIN_WIDTH, usable // cols)
+        return QSize(card_w, _CARD_HEIGHT)
+
+    def _sync_card_size_hints() -> None:
+        """Recompute every item sizeHint after the favorites viewport resizes."""
+        if favorites_list.count() == 0:
+            return
+        hint = _card_grid_size()
+        inner = QSize(max(1, hint.width() - 8), max(1, hint.height() - 8))
+        for index in range(favorites_list.count()):
+            item = favorites_list.item(index)
+            if item is None:
+                continue
+            if item.sizeHint() != hint:
+                item.setSizeHint(hint)
+            widget = favorites_list.itemWidget(item)
+            if widget is not None and widget.size() != inner:
+                widget.setFixedSize(inner)
+
+    class _FavoritesResizeFilter(QObject):
+        def eventFilter(self, obj, event):  # noqa: N802
+            if event.type() == QEvent.Type.Resize:
+                QTimer.singleShot(0, _sync_card_size_hints)
+            return False
+
+    _favorites_resize_filter = _FavoritesResizeFilter(favorites_list)
+    favorites_list.viewport().installEventFilter(_favorites_resize_filter)
+
+    def _repolish(widget) -> None:
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+
     def card_widget(path: str, label: str, demo: bool) -> QWidget:
-        row = QWidget()
-        row.setObjectName("repoCard")
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(12, 12, 12, 12)
-        row_layout.setSpacing(12)
+        """Vertical repo card: avatar, branch, action chips, sync footer."""
+        display = label or os.path.basename(path.rstrip("/")) or path
+        card = QWidget()
+        card.setObjectName("repoCard")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        root = QVBoxLayout(card)
+        root.setContentsMargins(14, 14, 14, 12)
+        root.setSpacing(8)
 
-        labels = QVBoxLayout()
-        labels.setSpacing(6)
-        labels.setContentsMargins(0, 0, 0, 0)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(10)
 
-        name = QLabel(label or os.path.basename(path.rstrip("/")) or path)
+        avatar = QLabel(_repo_initials(display))
+        avatar.setObjectName("repoAvatar")
+        avatar.setProperty("tone", str(sum(ord(c) for c in display) % 5))
+        avatar.setFixedSize(40, 40)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _bump_font(avatar, 1, 12, bold=True)
+        _repolish(avatar)
+        head.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
+
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(2)
+        name = QLabel(display)
         name.setObjectName("repoName")
-        _bump_font(name, 3, 16, bold=True)
+        _bump_font(name, 2, 14, bold=True)
         name.setWordWrap(False)
-        labels.addWidget(name)
+        title_col.addWidget(name)
 
         path_text = QLabel()
         path_text.setObjectName("repoPath")
-        # Flags before text — see styled_label: avoids the expensive re-layout.
         path_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         path_text.setToolTip(path)
         path_text.setWordWrap(False)
-        path_text.setText(path)
-        _bump_font(path_text, 1, 12)
-        # Single-line elided path — full path stays in the tooltip.
+        _bump_font(path_text, 0, 11)
         metrics = path_text.fontMetrics()
-        path_text.setText(metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, 480))
+        path_text.setText(metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, 220))
         path_text.setFixedHeight(metrics.height() + 2)
-        labels.addWidget(path_text)
+        title_col.addWidget(path_text)
+        head.addLayout(title_col, 1)
 
-        # Persistent branch / sync summary — fixed height so list rows don't jump.
+        branch_pill = QLabel("—")
+        branch_pill.setObjectName("cardBranch")
+        branch_pill.setProperty("role", "cardBranch")
+        branch_pill.setWordWrap(False)
+        branch_pill.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        branch_pill.setMaximumWidth(150)
+        _bump_font(branch_pill, 0, 11)
+        head.addWidget(branch_pill, 0, Qt.AlignmentFlag.AlignTop)
+        root.addLayout(head)
+
+        chips = QGridLayout()
+        chips.setContentsMargins(0, 2, 0, 0)
+        chips.setHorizontalSpacing(6)
+        chips.setVerticalSpacing(6)
+
+        def _chip(text: str, kind: str) -> QPushButton:
+            btn = QPushButton(text)
+            btn.setObjectName("cardChip")
+            btn.setProperty("kind", kind)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            _bump_font(btn, 0, 11)
+            _repolish(btn)
+            return btn
+
+        open_btn = _chip("Open", "primary")
+        open_btn.clicked.connect(lambda _checked=False, p=path: open_folder(p, demo=demo))
+        chips.addWidget(open_btn, 0, 0)
+
+        if demo:
+            demo_pill = QLabel("demo")
+            demo_pill.setObjectName("statusPill")
+            demo_pill.setProperty("state", "warn")
+            _bump_font(demo_pill, 0, 11)
+            chips.addWidget(demo_pill, 0, 1)
+        else:
+            vscode_btn = _chip("VS Code", "accent")
+            vscode_btn.setToolTip("Open in VS Code")
+            vscode_btn.clicked.connect(lambda _checked=False, p=path: open_in_vscode(p))
+            chips.addWidget(vscode_btn, 0, 1)
+
+            finder_btn = _chip("Finder", "ghost")
+            finder_btn.setToolTip("Reveal in Finder")
+            finder_btn.clicked.connect(lambda _checked=False, p=path: reveal_in_finder(p))
+            chips.addWidget(finder_btn, 0, 2)
+
+            terminal_btn = _chip("Terminal", "ghost")
+            terminal_btn.setToolTip("Open in Terminal")
+            terminal_btn.clicked.connect(lambda _checked=False, p=path: open_in_terminal(p))
+            chips.addWidget(terminal_btn, 1, 0)
+
+            edit_btn = _chip("Edit", "ghost")
+            edit_btn.setToolTip("Edit repository")
+            edit_btn.clicked.connect(lambda _checked=False, p=path: edit_repository(p))
+            chips.addWidget(edit_btn, 1, 1)
+
+            unpin_btn = _chip("Unpin", "danger")
+            unpin_btn.setToolTip("Remove from favorites")
+            unpin_btn.clicked.connect(lambda _checked=False, p=path: remove_favorite(p))
+            chips.addWidget(unpin_btn, 1, 2)
+
+        root.addLayout(chips)
+
+        foot = QHBoxLayout()
+        foot.setContentsMargins(0, 4, 0, 0)
+        foot.setSpacing(8)
+        # Sync summary (Clean / Ahead / Behind) — filled by Refresh status.
         remote_pill = QLabel("…")
-        remote_pill.setObjectName("statusPill")
+        remote_pill.setObjectName("cardRemoteStatus")
         remote_pill.setProperty("role", "cardRemoteStatus")
         remote_pill.setProperty("state", "")
         remote_pill.setWordWrap(False)
-        remote_pill.setFixedHeight(26)
-        _bump_font(remote_pill, 2, 13)
-        labels.addWidget(remote_pill, 0, Qt.AlignmentFlag.AlignLeft)
+        _bump_font(remote_pill, 1, 12)
+        foot.addWidget(remote_pill, 0, Qt.AlignmentFlag.AlignLeft)
 
-        # Short op feedback — reserved slot (clear text instead of hide/show).
+        # Brief op toast (checkout/fetch feedback) — sits between status and stamp.
         status_label = styled_label("", "hint")
         status_label.setProperty("role", "cardStatus")
         status_label.setWordWrap(False)
-        _bump_font(status_label, 2, 13)
-        status_label.setFixedHeight(metrics.height() + 2)
-        labels.addWidget(status_label)
+        _bump_font(status_label, 0, 11)
+        foot.addWidget(status_label, 1)
 
-        row_layout.addLayout(labels, 1)
-
-        if demo:
-            pill = QLabel("demo")
-            pill.setObjectName("statusPill")
-            pill.setProperty("state", "warn")
-            _bump_font(pill, 1, 12)
-            row_layout.addWidget(pill, 0, Qt.AlignmentFlag.AlignTop)
-
-        actions = QHBoxLayout()
-        actions.setSpacing(4)
-        actions.setContentsMargins(0, 0, 0, 0)
-        open_btn = button("Open", "ghost")
-        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        _bump_font(open_btn, 2, 13)
-        open_btn.clicked.connect(lambda _checked=False, p=path: open_folder(p, demo=demo))
-        actions.addWidget(open_btn)
-        if not demo:
-            vscode_btn = icon_button(icons, "open", "Open in VS Code")
-            vscode_btn.setObjectName("cardOpenVscode")
-            vscode_btn.clicked.connect(lambda _checked=False, p=path: open_in_vscode(p))
-            actions.addWidget(vscode_btn)
-            finder_btn = icon_button(icons, "folder", "Reveal in Finder")
-            finder_btn.setObjectName("cardRevealFinder")
-            finder_btn.clicked.connect(lambda _checked=False, p=path: reveal_in_finder(p))
-            actions.addWidget(finder_btn)
-            terminal_btn = icon_button(icons, "terminal", "Open in Terminal")
-            terminal_btn.setObjectName("cardOpenTerminal")
-            terminal_btn.clicked.connect(lambda _checked=False, p=path: open_in_terminal(p))
-            actions.addWidget(terminal_btn)
-            edit_btn = icon_button(icons, "edit", "Edit repository")
-            edit_btn.setObjectName("editRepoButton")
-            edit_btn.clicked.connect(lambda _checked=False, p=path: edit_repository(p))
-            actions.addWidget(edit_btn)
-            unpin = icon_button(icons, "close", "Remove from favorites")
-            unpin.setObjectName("unpinButton")
-            unpin.clicked.connect(lambda _checked=False, p=path: remove_favorite(p))
-            actions.addWidget(unpin)
-        row_layout.addLayout(actions, 0)
-        row_layout.setAlignment(actions, Qt.AlignmentFlag.AlignTop)
-        return row
+        updated = QLabel("")
+        updated.setObjectName("cardUpdated")
+        updated.setProperty("role", "cardUpdated")
+        updated.setWordWrap(False)
+        updated.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        _bump_font(updated, 0, 11)
+        foot.addWidget(updated, 0, Qt.AlignmentFlag.AlignRight)
+        root.addLayout(foot)
+        return card
 
     def add_card(path: str, label: str, demo: bool) -> None:
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, path)
         widget = card_widget(path, label, demo)
-        # Fixed height — status updates must not resize rows (scroll jank).
-        item.setSizeHint(QSize(0, _CARD_ROW_HEIGHT))
+        hint = _card_grid_size()
+        item.setSizeHint(hint)
         # The item must be in the list *before* setItemWidget — otherwise the
         # widget is never attached to the view and the card never renders.
         favorites_list.addItem(item)
         favorites_list.setItemWidget(item, widget)
+        widget.setFixedSize(max(1, hint.width() - 8), max(1, hint.height() - 8))
 
     def add_group_row(key: str, name: str, count: int) -> None:
         """One selectable row in the left group list (name + repo count)."""
@@ -668,6 +780,55 @@ def build_view(icons, ctx=None) -> QWidget:
             last_refresh_label.show()
         else:
             last_refresh_label.hide()
+        _render_card_updated_labels()
+
+    def _updated_text_for_path(path: str) -> str:
+        """Relative 'updated … ago' for a card — per-repo stamp, else group."""
+        epoch = status_times.get(path)
+        if epoch is None:
+            group = landing_state.get("group")
+            if group is not None and group != "__demo__":
+                epoch = last_refresh_map.get(str(group))
+        if not epoch:
+            return ""
+        return _relative_refresh_text(float(epoch))
+
+    def _card_updated_label(path: str):
+        try:
+            for i in range(favorites_list.count()):
+                item = favorites_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) != path:
+                    continue
+                widget = favorites_list.itemWidget(item)
+                if widget is None:
+                    return None
+                for label in widget.findChildren(QLabel):
+                    if label.property("role") == "cardUpdated":
+                        return label
+        except RuntimeError:
+            return None
+        return None
+
+    def _apply_card_updated(path: str) -> None:
+        label = _card_updated_label(path)
+        if label is None:
+            return
+        try:
+            label.setText(_updated_text_for_path(path))
+        except RuntimeError:
+            pass
+
+    def _render_card_updated_labels() -> None:
+        """Refresh every visible card's bottom-right updated stamp."""
+        try:
+            for i in range(favorites_list.count()):
+                item = favorites_list.item(i)
+                path = item.data(Qt.ItemDataRole.UserRole)
+                if not path:
+                    continue
+                _apply_card_updated(path)
+        except RuntimeError:
+            pass
 
     def _set_bulk_enabled(enabled: bool) -> None:
         bulk_fetch.setEnabled(enabled)
@@ -1079,6 +1240,7 @@ def build_view(icons, ctx=None) -> QWidget:
         if favorites_repo is not None:
             favorites_repo.remove_ref("folder", path)
         status_cache.pop(path, None)  # don't keep a stale entry for unpinned repos
+        status_times.pop(path, None)
         refresh_favorites()
 
     # -------------------------------------------------------- console + bulk
@@ -2041,39 +2203,53 @@ def build_view(icons, ctx=None) -> QWidget:
     # keyed by path so a rebuilt landing can render it instantly, and
     # refreshed asynchronously via the ``remote_status`` git operation.
 
+    def _format_branch_name(result: dict) -> str:
+        branch = str(result.get("branch") or "").strip()
+        if not branch or branch == "HEAD (no branch)":
+            return "detached"
+        return branch
+
     def _format_remote_status(result: dict) -> str:
-        """Render a status result as a compact card pill."""
-        branch = result.get("branch") or ""
+        """Sync summary only (branch lives in the top-right pill)."""
         upstream = result.get("upstream")
         ahead = int(result.get("ahead") or 0)
         behind = int(result.get("behind") or 0)
-        if not branch or branch == "HEAD (no branch)":
-            branch = "detached"
         if not upstream:
-            return f"{branch} · no upstream"
+            return "No upstream"
         if ahead and behind:
-            return f"{branch} · ↑{ahead} ↓{behind}"
+            return f"Diverged · ↑{ahead} ↓{behind}"
         if ahead:
-            return f"{branch} · ↑{ahead}"
+            return f"Ahead {ahead}"
         if behind:
-            return f"{branch} · ↓{behind}"
-        return f"{branch} · up to date"
+            return f"Behind {behind}"
+        return "Clean"
 
     def _apply_remote_status(label, result: dict, path: str | None = None) -> None:
-        """Fill a card's branch pill; plain folders stay as an empty reserved row."""
+        """Fill branch (top-right) + sync footer on the card."""
         try:
+            card = label
+            while card is not None and card.objectName() != "repoCard":
+                card = card.parentWidget()
+            branch_label = None
+            if card is not None:
+                for child in card.findChildren(QLabel):
+                    if child.property("role") == "cardBranch":
+                        branch_label = child
+                        break
+
             if not result.get("is_repo"):
                 label.setText("")
                 label.setProperty("state", "")
                 label.setToolTip("")
                 label.style().unpolish(label)
                 label.style().polish(label)
+                if branch_label is not None:
+                    branch_label.setText("—")
+                    branch_label.setToolTip("")
                 return
-            text = _format_remote_status(result)
+
             ahead = int(result.get("ahead") or 0)
             behind = int(result.get("behind") or 0)
-            # Semantic duotone: amber = your commits ahead, cyan = upstream
-            # commits behind, green = in sync, red = diverged, dim = no remote.
             state = (
                 "diverged" if ahead and behind
                 else "ahead" if ahead
@@ -2081,11 +2257,20 @@ def build_view(icons, ctx=None) -> QWidget:
                 else "ok" if result.get("upstream")
                 else "none"
             )
+            text = _format_remote_status(result)
             label.setText(text)
             label.setProperty("state", state)
             label.setToolTip(text)
             label.style().unpolish(label)
             label.style().polish(label)
+
+            if branch_label is not None:
+                branch = _format_branch_name(result)
+                metrics = branch_label.fontMetrics()
+                branch_label.setToolTip(branch)
+                branch_label.setText(
+                    metrics.elidedText(branch, Qt.TextElideMode.ElideMiddle, 140)
+                )
         except RuntimeError:
             pass  # the card was rebuilt while the worker ran
 
@@ -2115,11 +2300,11 @@ def build_view(icons, ctx=None) -> QWidget:
                 if not path:
                     continue
                 result = status_cache.get(path)
-                if result is None:
-                    continue
-                label = _card_remote_pill(path)
-                if label is not None:
-                    _apply_remote_status(label, result, path)
+                if result is not None:
+                    label = _card_remote_pill(path)
+                    if label is not None:
+                        _apply_remote_status(label, result, path)
+                _apply_card_updated(path)
         except RuntimeError:
             pass
 
@@ -2201,9 +2386,12 @@ def build_view(icons, ctx=None) -> QWidget:
             if current in status_workers:
                 status_workers.remove(current)
             status_cache[path] = result
+            if result.get("is_repo"):
+                status_times[path] = time.time()
             label = _card_remote_pill(path)
             if label is not None:
                 _apply_remote_status(label, result, path)
+            _apply_card_updated(path)
             # Status workers complete in a burst — debounce the drift bars.
             drift_timer.start()
             if counts:
@@ -2217,14 +2405,7 @@ def build_view(icons, ctx=None) -> QWidget:
             }
             label = _card_remote_pill(path)
             if label is not None:
-                try:
-                    label.setText("")
-                    label.setProperty("state", "")
-                    label.setToolTip("")
-                    label.style().unpolish(label)
-                    label.style().polish(label)
-                except RuntimeError:
-                    pass
+                _apply_remote_status(label, status_cache[path], path)
             if counts:
                 _status_worker_finished()
 

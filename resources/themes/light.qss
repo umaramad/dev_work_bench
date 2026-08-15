@@ -199,11 +199,10 @@ QFrame#errorBanner { background: rgba(208, 80, 80, 0.11);
 QLabel#errorBannerText { color: #d05050; font-weight: 600; }
 QLabel#errorBannerDetail { color: #5c6577; font-size: 12px; }
 
-/* ---------- git landing: fleet ledger ----------
-   The landing is a ledger, not a card browser: hairline rows, mono for
-   everything that is an address (repo names, branches, sync counts,
-   console), and a semantic duotone — amber = your work (ahead / current),
-   cyan = upstream (behind), green = clean, red = diverged. */
+/* ---------- git landing: repo card grid ----------
+   Two-column IconMode cards: avatar + branch top-right, action chips,
+   sync footer. Theme tokens only (no separate dashboard palette).
+   Semantic status: amber = ahead, cyan = behind, green = clean, red = diverged. */
 QListWidget#groupList, QListWidget#favoritesList {
     background: transparent; border: none; border-radius: 0; }
 QListWidget#groupList::item, QListWidget#favoritesList::item { padding: 0; }
@@ -218,10 +217,35 @@ QPushButton#groupRow:checked { background: #ffffff;
 QWidget#commandDeck { background: #ffffff; border: 1px solid #dfe2ea;
     border-radius: 8px; }
 QWidget#repoCard { background: #ffffff; border: 1px solid #dfe2ea;
-    border-radius: 8px; }
+    border-radius: 14px; }
+QWidget#repoCard:hover { border-color: #c9cede; }
+QLabel#repoAvatar {
+    border-radius: 20px; color: #ffffff; font-weight: 700;
+    background: #2f6fdd; }
+QLabel#repoAvatar[tone="0"] { background: #2f6fdd; }
+QLabel#repoAvatar[tone="1"] { background: #2c9d68; }
+QLabel#repoAvatar[tone="2"] { background: #8a5fd0; }
+QLabel#repoAvatar[tone="3"] { background: #c08a2d; }
+QLabel#repoAvatar[tone="4"] { background: #1f9bb0; }
 QLabel#repoName { font-family: "SF Mono", Menlo, monospace; font-weight: 600;
     color: #232833; }
 QLabel#repoPath { font-family: "SF Mono", Menlo, monospace; color: #9aa2b4; }
+QLabel#cardBranch {
+    font-family: "SF Mono", Menlo, monospace; font-size: 11px; color: #5c6577;
+    background: rgba(47, 111, 221, 0.14); border: 1px solid #c9cede;
+    border-radius: 10px; padding: 3px 8px; }
+QPushButton#cardChip {
+    border-radius: 999px; padding: 5px 10px; font-size: 11px; font-weight: 600;
+    border: 1px solid #c9cede; background: #eceef3; color: #232833; }
+QPushButton#cardChip:hover { background: #e3e6ee; border-color: #c9cede; }
+QPushButton#cardChip[kind="primary"] {
+    background: rgba(76, 195, 138, 0.14); border-color: #2c9d68; color: #2c9d68; }
+QPushButton#cardChip[kind="accent"] {
+    background: rgba(47, 111, 221, 0.14); border-color: #2f6fdd; color: #2f6fdd; }
+QPushButton#cardChip[kind="ghost"] {
+    background: transparent; border-color: #dfe2ea; color: #5c6577; }
+QPushButton#cardChip[kind="danger"] {
+    background: rgba(208, 80, 80, 0.11); border-color: rgba(208, 80, 80, 0.5); color: #d05050; }
 QLabel#cardRemoteStatus { font-family: "SF Mono", Menlo, monospace;
     font-size: 12px; color: #5c6577; }
 QLabel#cardRemoteStatus[state="ok"] { color: #2c9d68; }
@@ -231,6 +255,8 @@ QLabel#cardRemoteStatus[state="diverged"] { color: #d05050; }
 QLabel#cardRemoteStatus[state="none"] { color: #9aa2b4; }
 QLabel#cardRemoteStatus[state="warn"] { color: #c08a2d; }
 QLabel#cardRemoteStatus[state="err"] { color: #d05050; }
+QLabel#cardUpdated { font-family: "SF Mono", Menlo, monospace;
+    font-size: 11px; color: #9aa2b4; }
 QLabel[role="cardStatus"] { font-family: "SF Mono", Menlo, monospace; }
 QWidget#gitConsole { border-top: 1px solid #dfe2ea; }
 QPushButton#consoleToggle { font-family: "SF Mono", Menlo, monospace;
