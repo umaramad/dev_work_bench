@@ -301,15 +301,15 @@ QListWidget#groupList::item, QListWidget#favoritesList::item { padding: 0; }
 QLabel#groupsHeading { color: __text3; font-weight: 700; letter-spacing: 1.5px; }
 QLabel#groupTitle { color: __text; font-weight: 700;
     font-family: "SF Mono", Menlo, monospace; }
-QPushButton#groupRow { background: transparent; border: 1px solid transparent;
+QPushButton#groupRow { background: transparent; border: 1px solid __border;
     border-radius: 7px; }
-QPushButton#groupRow:hover { background: __surface2; }
+QPushButton#groupRow:hover { background: __surface2; border-color: __border2; }
 QPushButton#groupRow:checked { background: __surface;
     border: 1px solid __border2; border-left: 3px solid __amber; }
 QWidget#commandDeck { background: __surface; border: 1px solid __border;
     border-radius: 8px; }
-QWidget#repoCard { background: transparent; border: none;
-    border-bottom: 1px solid __border; }
+QWidget#repoCard { background: __surface; border: 1px solid __border;
+    border-radius: 8px; }
 QLabel#repoName { font-family: "SF Mono", Menlo, monospace; font-weight: 600;
     color: __text; }
 QLabel#repoPath { font-family: "SF Mono", Menlo, monospace; color: __text3; }
