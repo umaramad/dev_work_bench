@@ -10,6 +10,7 @@ from devworkbench.workers.compare_worker import CompareWorker
 from devworkbench.workers.folder_sync_worker import FolderSyncWorker
 from devworkbench.workers.git_worker import GitWorker
 from devworkbench.workers.log_worker import LogParserWorker
+from devworkbench.workers.maven_worker import MavenPomWorker
 from devworkbench.workers.ssh_worker import SshWorker
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "FolderSyncWorker",
     "GitWorker",
     "LogParserWorker",
+    "MavenPomWorker",
     "SshWorker",
     "Worker",
 ]

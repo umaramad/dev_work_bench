@@ -1,0 +1,505 @@
+"""MavenPomWorker — scan local pom.xml files for declared dependencies.
+
+Reads the working tree only (current checkout). No network, no ``mvn`` CLI.
+Resolves ``${property}`` placeholders from local ``<properties>`` and parent poms
+in the reactor (e.g. ``${flyway.version}`` → ``9.22.3``).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import xml.etree.ElementTree as ET
+
+from devworkbench.workers.base import Worker
+
+_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "target",
+        "node_modules",
+        ".idea",
+        ".vscode",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "build",
+        "dist",
+        "out",
+    }
+)
+_MAX_POMS = 500
+_PROP_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _tag_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _child_text(parent: ET.Element, name: str, default: str = "") -> str:
+    for child in list(parent):
+        if _tag_name(child.tag) == name:
+            return (child.text or "").strip() or default
+    return default
+
+
+def _find_child(parent: ET.Element, name: str) -> ET.Element | None:
+    for child in list(parent):
+        if _tag_name(child.tag) == name:
+            return child
+    return None
+
+
+def _parse_properties(root: ET.Element) -> dict[str, str]:
+    props: dict[str, str] = {}
+    el = _find_child(root, "properties")
+    if el is None:
+        return props
+    for child in list(el):
+        name = _tag_name(child.tag)
+        if name:
+            props[name] = (child.text or "").strip()
+    return props
+
+
+def _parse_dependency(elem: ET.Element, *, managed: bool) -> dict | None:
+    group_id = _child_text(elem, "groupId")
+    artifact_id = _child_text(elem, "artifactId")
+    if not group_id or not artifact_id:
+        return None
+    return {
+        "group_id": group_id,
+        "artifact_id": artifact_id,
+        "version": _child_text(elem, "version"),
+        "scope": _child_text(elem, "scope", "compile") or "compile",
+        "type": _child_text(elem, "type", "jar") or "jar",
+        "managed": managed,
+    }
+
+
+def _parse_dependencies_block(root: ET.Element, *, managed: bool) -> list[dict]:
+    deps: list[dict] = []
+    if managed:
+        dep_mgmt = _find_child(root, "dependencyManagement")
+        container = _find_child(dep_mgmt, "dependencies") if dep_mgmt is not None else None
+    else:
+        container = _find_child(root, "dependencies")
+    if container is None:
+        return deps
+    for child in list(container):
+        if _tag_name(child.tag) != "dependency":
+            continue
+        row = _parse_dependency(child, managed=managed)
+        if row:
+            deps.append(row)
+    return deps
+
+
+def parse_pom_file(pom_path: str) -> dict:
+    """Parse one pom.xml → module metadata, properties, and declared deps."""
+    tree = ET.parse(pom_path)
+    root = tree.getroot()
+    parent = _find_child(root, "parent")
+    parent_info: dict | None = None
+    if parent is not None:
+        relative = _child_text(parent, "relativePath", "../pom.xml")
+        parent_info = {
+            "group_id": _child_text(parent, "groupId"),
+            "artifact_id": _child_text(parent, "artifactId"),
+            "version": _child_text(parent, "version"),
+            "relative_path": relative,
+        }
+
+    group_id = _child_text(root, "groupId")
+    if not group_id and parent_info is not None:
+        group_id = parent_info["group_id"]
+    artifact_id = _child_text(root, "artifactId") or os.path.basename(os.path.dirname(pom_path))
+    version = _child_text(root, "version")
+    if not version and parent_info is not None:
+        version = parent_info["version"]
+    packaging = _child_text(root, "packaging", "jar") or "jar"
+
+    module_dirs: list[str] = []
+    modules_el = _find_child(root, "modules")
+    if modules_el is not None:
+        for child in list(modules_el):
+            if _tag_name(child.tag) == "module":
+                name = (child.text or "").strip()
+                if name:
+                    module_dirs.append(name)
+
+    return {
+        "pom_path": os.path.abspath(pom_path),
+        "module_id": artifact_id,
+        "group_id": group_id,
+        "version": version,
+        "packaging": packaging,
+        "module_dirs": module_dirs,
+        "properties": _parse_properties(root),
+        "parent": parent_info,
+        "dependencies": _parse_dependencies_block(root, managed=False),
+        "managed_dependencies": _parse_dependencies_block(root, managed=True),
+    }
+
+
+def resolve_properties(text: str, props: dict[str, str], *, max_passes: int = 8) -> str:
+    """Replace ``${name}`` using ``props``; leave unknown placeholders intact."""
+    if not text or "${" not in text:
+        return text
+    value = text
+    for _ in range(max_passes):
+        if "${" not in value:
+            break
+
+        def repl(match: re.Match) -> str:
+            key = match.group(1).strip()
+            if key in props and props[key] is not None:
+                return str(props[key])
+            return match.group(0)
+
+        nxt = _PROP_RE.sub(repl, value)
+        if nxt == value:
+            break
+        value = nxt
+    return value
+
+
+def _resolve_parent_pom(meta: dict, by_path: dict[str, dict], by_ga: dict[tuple, str]) -> str | None:
+    """Locate parent pom path inside the scanned reactor (local only)."""
+    parent = meta.get("parent")
+    if not parent:
+        return None
+    pom_path = meta["pom_path"]
+    base = os.path.dirname(pom_path)
+    rel = (parent.get("relative_path") or "../pom.xml").strip()
+    if rel:
+        candidate = os.path.abspath(os.path.join(base, rel))
+        if os.path.isdir(candidate):
+            candidate = os.path.join(candidate, "pom.xml")
+        if candidate in by_path:
+            return candidate
+        if os.path.isfile(candidate) and candidate not in by_path:
+            # Parent outside collected set — try parse on demand later via by_path only
+            pass
+    ga = (parent.get("group_id") or "", parent.get("artifact_id") or "")
+    if ga[0] and ga[1] and ga in by_ga:
+        return by_ga[ga]
+    # Default Maven relativePath
+    fallback = os.path.abspath(os.path.join(base, "..", "pom.xml"))
+    if fallback in by_path:
+        return fallback
+    return None
+
+
+def _ancestor_chain(pom_path: str, by_path: dict[str, dict], by_ga: dict[tuple, str]) -> list[str]:
+    """Root-first list of pom paths from oldest parent to ``pom_path``."""
+    chain: list[str] = []
+    seen: set[str] = set()
+    current: str | None = pom_path
+    while current and current not in seen:
+        seen.add(current)
+        chain.append(current)
+        meta = by_path.get(current)
+        if meta is None:
+            break
+        current = _resolve_parent_pom(meta, by_path, by_ga)
+    chain.reverse()
+    return chain
+
+
+def _effective_properties(pom_path: str, by_path: dict[str, dict], by_ga: dict[tuple, str]) -> dict[str, str]:
+    """Merge properties root→child, then add project.* for this pom."""
+    props: dict[str, str] = {}
+    chain = _ancestor_chain(pom_path, by_path, by_ga)
+    for path in chain:
+        meta = by_path.get(path) or {}
+        for key, value in (meta.get("properties") or {}).items():
+            props[key] = value
+    # Resolve property values that themselves reference other properties.
+    for _ in range(6):
+        changed = False
+        for key, value in list(props.items()):
+            resolved = resolve_properties(value, props)
+            if resolved != value:
+                props[key] = resolved
+                changed = True
+        if not changed:
+            break
+
+    meta = by_path.get(pom_path) or {}
+    # project.* after custom props so they win for standard Maven interpolation.
+    group_id = resolve_properties(meta.get("group_id") or "", props)
+    artifact_id = resolve_properties(meta.get("module_id") or "", props)
+    version = resolve_properties(meta.get("version") or "", props)
+    props.setdefault("project.groupId", group_id)
+    props.setdefault("project.artifactId", artifact_id)
+    props.setdefault("project.version", version)
+    props.setdefault("groupId", group_id)
+    props.setdefault("artifactId", artifact_id)
+    props.setdefault("version", version)
+    props.setdefault("pom.groupId", group_id)
+    props.setdefault("pom.artifactId", artifact_id)
+    props.setdefault("pom.version", version)
+    return props
+
+
+def _effective_managed_versions(
+    pom_path: str, by_path: dict[str, dict], by_ga: dict[tuple, str], props: dict[str, str]
+) -> dict[tuple[str, str], str]:
+    """GAV version map from dependencyManagement along the parent chain."""
+    managed: dict[tuple[str, str], str] = {}
+    for path in _ancestor_chain(pom_path, by_path, by_ga):
+        meta = by_path.get(path) or {}
+        path_props = _effective_properties(path, by_path, by_ga) if path != pom_path else props
+        for dep in meta.get("managed_dependencies") or []:
+            gid = resolve_properties(dep.get("group_id") or "", path_props)
+            aid = resolve_properties(dep.get("artifact_id") or "", path_props)
+            ver = resolve_properties(dep.get("version") or "", path_props)
+            if gid and aid and ver:
+                managed[(gid, aid)] = ver
+    return managed
+
+
+def _collect_poms_via_modules(root_pom: str) -> list[str]:
+    """BFS follow ``<modules>`` from ``root_pom``."""
+    found: list[str] = []
+    seen: set[str] = set()
+    queue = [os.path.abspath(root_pom)]
+    while queue and len(found) < _MAX_POMS:
+        pom = queue.pop(0)
+        if pom in seen or not os.path.isfile(pom):
+            continue
+        seen.add(pom)
+        found.append(pom)
+        try:
+            meta = parse_pom_file(pom)
+        except Exception:  # noqa: BLE001 — skip broken poms during discovery
+            continue
+        base = os.path.dirname(pom)
+        for rel in meta.get("module_dirs") or []:
+            child = os.path.abspath(os.path.join(base, rel, "pom.xml"))
+            if child not in seen:
+                queue.append(child)
+    return found
+
+
+def _collect_poms_walk(root: str) -> list[str]:
+    found: list[str] = []
+    root = os.path.abspath(root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+        if "pom.xml" in filenames:
+            found.append(os.path.join(dirpath, "pom.xml"))
+            if len(found) >= _MAX_POMS:
+                break
+    return found
+
+
+def collect_pom_paths(repo_path: str) -> list[str]:
+    """Prefer reactor via root pom modules; fall back to a directory walk."""
+    root_pom = os.path.join(os.path.abspath(repo_path), "pom.xml")
+    if os.path.isfile(root_pom):
+        via_modules = _collect_poms_via_modules(root_pom)
+        if via_modules:
+            return via_modules
+    return _collect_poms_walk(repo_path)
+
+
+def scan_declared_dependencies(repo_path: str) -> dict:
+    """Scan ``repo_path`` and return modules + dependency rows with resolved versions."""
+    repo_path = os.path.abspath(repo_path)
+    pom_paths = collect_pom_paths(repo_path)
+    by_path: dict[str, dict] = {}
+    errors: list[dict] = []
+
+    for pom_path in pom_paths:
+        try:
+            meta = parse_pom_file(pom_path)
+            by_path[meta["pom_path"]] = meta
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"pom_path": pom_path, "error": str(exc)})
+
+    # Also load relative parents that sit just outside the module BFS (same repo).
+    extra: list[str] = []
+    for meta in list(by_path.values()):
+        parent = meta.get("parent")
+        if not parent:
+            continue
+        rel = (parent.get("relative_path") or "../pom.xml").strip()
+        if not rel:
+            continue
+        candidate = os.path.abspath(os.path.join(os.path.dirname(meta["pom_path"]), rel))
+        if os.path.isdir(candidate):
+            candidate = os.path.join(candidate, "pom.xml")
+        if (
+            candidate not in by_path
+            and os.path.isfile(candidate)
+            and candidate.startswith(repo_path + os.sep)
+        ):
+            extra.append(candidate)
+    for pom_path in extra:
+        try:
+            meta = parse_pom_file(pom_path)
+            by_path[meta["pom_path"]] = meta
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"pom_path": pom_path, "error": str(exc)})
+
+    by_ga: dict[tuple, str] = {}
+    for path, meta in by_path.items():
+        ga = (meta.get("group_id") or "", meta.get("module_id") or "")
+        if ga[0] and ga[1]:
+            by_ga[ga] = path
+
+    modules: list[dict] = []
+    rows: list[dict] = []
+
+    for pom_path in pom_paths:
+        abs_pom = os.path.abspath(pom_path)
+        meta = by_path.get(abs_pom)
+        if meta is None:
+            continue
+        props = _effective_properties(abs_pom, by_path, by_ga)
+        managed_versions = _effective_managed_versions(abs_pom, by_path, by_ga, props)
+        module_id = resolve_properties(meta["module_id"], props)
+        rel = os.path.relpath(os.path.dirname(abs_pom), repo_path)
+        modules.append(
+            {
+                "module_id": module_id,
+                "pom_path": abs_pom,
+                "rel_path": "." if rel == "." else rel,
+                "group_id": resolve_properties(meta.get("group_id") or "", props),
+                "version": resolve_properties(meta.get("version") or "", props),
+            }
+        )
+
+        declared = list(meta.get("dependencies") or [])
+        # Include managed-only entries from this pom as managed rows.
+        declared.extend(meta.get("managed_dependencies") or [])
+
+        for dep in declared:
+            group_id = resolve_properties(dep.get("group_id") or "", props)
+            artifact_id = resolve_properties(dep.get("artifact_id") or "", props)
+            version = resolve_properties(dep.get("version") or "", props)
+            if not version:
+                version = managed_versions.get((group_id, artifact_id), "")
+            scope = resolve_properties(dep.get("scope") or "compile", props) or "compile"
+            dep_type = resolve_properties(dep.get("type") or "jar", props) or "jar"
+            rows.append(
+                {
+                    "module_id": module_id,
+                    "group_id": group_id,
+                    "artifact_id": artifact_id,
+                    "version": version,
+                    "scope": scope,
+                    "type": dep_type,
+                    "pom_path": abs_pom,
+                    "managed": bool(dep.get("managed")),
+                }
+            )
+
+    modules.sort(key=lambda m: (m["rel_path"].casefold(), m["module_id"].casefold()))
+    rows.sort(
+        key=lambda r: (
+            r["group_id"].casefold(),
+            r["artifact_id"].casefold(),
+            r["module_id"].casefold(),
+        )
+    )
+    return {
+        "repo_path": repo_path,
+        "modules": modules,
+        "dependencies": rows,
+        "errors": errors,
+        "pom_count": len(pom_paths),
+    }
+
+
+def dependencies_to_html(
+    *,
+    repo_path: str,
+    branch: str,
+    rows: list[dict],
+    title: str = "Maven dependencies",
+) -> str:
+    """Self-contained HTML report for the given rows (already filtered)."""
+    import html as html_mod
+    from datetime import datetime, timezone
+
+    def esc(value: object) -> str:
+        return html_mod.escape(str(value or ""), quote=True)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    body_rows = []
+    for row in rows:
+        managed = " yes" if row.get("managed") else ""
+        body_rows.append(
+            "<tr>"
+            f"<td>{esc(row.get('group_id'))}</td>"
+            f"<td>{esc(row.get('artifact_id'))}</td>"
+            f"<td>{esc(row.get('version'))}</td>"
+            f"<td>{esc(row.get('scope'))}</td>"
+            f"<td>{esc(row.get('module_id'))}</td>"
+            f"<td>{esc(managed.strip())}</td>"
+            "</tr>"
+        )
+    table_body = "\n".join(body_rows) or (
+        '<tr><td colspan="6">No dependencies in the current view.</td></tr>'
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>{esc(title)}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           margin: 24px; color: #1a1f1c; background: #f6f7f5; }}
+    h1 {{ font-size: 1.4rem; margin: 0 0 6px; }}
+    .meta {{ color: #5c6b62; font-size: 0.9rem; margin-bottom: 18px; }}
+    table {{ border-collapse: collapse; width: 100%; background: #fff;
+             border: 1px solid #d5ddd7; }}
+    th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4ebe6;
+              font-size: 0.88rem; vertical-align: top; }}
+    th {{ background: #eef3ef; font-size: 0.72rem; text-transform: uppercase;
+         letter-spacing: 0.04em; color: #5c6b62; }}
+    code {{ font-family: ui-monospace, Menlo, monospace; font-size: 0.84rem; }}
+  </style>
+</head>
+<body>
+  <h1>{esc(title)}</h1>
+  <div class="meta">
+    <div><strong>Repo:</strong> <code>{esc(repo_path)}</code></div>
+    <div><strong>Branch:</strong> {esc(branch or "—")}</div>
+    <div><strong>Generated:</strong> {esc(now)}</div>
+    <div><strong>Rows:</strong> {len(rows)}</div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>groupId (family)</th>
+        <th>artifactId</th>
+        <th>Version</th>
+        <th>Scope</th>
+        <th>Module</th>
+        <th>Managed</th>
+      </tr>
+    </thead>
+    <tbody>
+{table_body}
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+
+
+class MavenPomWorker(Worker):
+    """Scan a local repo path for declared Maven dependencies."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self._path = path
+
+    def work(self):
+        return scan_declared_dependencies(self._path)

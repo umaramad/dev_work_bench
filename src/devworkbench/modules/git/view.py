@@ -55,6 +55,7 @@ from devworkbench.modules.git.dialog import (
     RepoDialog,
     ScanReposDialog,
 )
+from devworkbench.modules.git.maven_deps import build_maven_deps_pane
 from devworkbench.ui.samples import GIT_REPOS
 from devworkbench.ui.theme import current_colors
 from devworkbench.ui.widgets.common import button, clear_list_widget, icon_button, search_field, styled_label
@@ -2132,6 +2133,16 @@ def build_view(icons, ctx=None) -> QWidget:
         top_layout.addWidget(branch_pill)
         page_layout.addWidget(top)
 
+        # Inner tabs: Git ops (existing) | Maven Dependencies (declared, local).
+        repo_inner = QTabWidget()
+        repo_inner.setObjectName("repoInnerTabs")
+        repo_inner.setDocumentMode(True)
+
+        git_page = QWidget()
+        git_page_layout = QVBoxLayout(git_page)
+        git_page_layout.setContentsMargins(0, 8, 0, 0)
+        git_page_layout.setSpacing(8)
+
         # -- quick ops -----------------------------------------------------------
         ops_row = QWidget()
         ops_layout = QHBoxLayout(ops_row)
@@ -2151,12 +2162,12 @@ def build_view(icons, ctx=None) -> QWidget:
         for widget in (fetch_button, pull_button, status_button, commits_button, fetch_all_button):
             ops_layout.addWidget(widget)
         ops_layout.addStretch(1)
-        page_layout.addWidget(ops_row)
+        git_page_layout.addWidget(ops_row)
 
         status_label = styled_label("", "hint")
         status_label.setObjectName("gitStatusLabel")
         status_label.setWordWrap(True)
-        page_layout.addWidget(status_label)
+        git_page_layout.addWidget(status_label)
 
         result_stack = QStackedWidget()
         result_stack.setObjectName("gitResultStack")
@@ -2182,13 +2193,29 @@ def build_view(icons, ctx=None) -> QWidget:
         commits_table.setColumnWidth(2, 110)
         commits_table.horizontalHeader().setStretchLastSection(True)
         result_stack.addWidget(commits_table)
-        page_layout.addWidget(result_stack, 1)
+        git_page_layout.addWidget(result_stack, 1)
+        repo_inner.addTab(git_page, "Git")
 
         # -- per-tab state ---------------------------------------------------------
         state = {"path": path, "busy": False, "is_repo": False}
         pending: list = []
         # Retained on the page so close_tab can cancel in-flight workers.
         page.pending_workers = pending
+
+        deps_pane = build_maven_deps_pane(
+            repo_path=path,
+            pending_workers=pending,
+            is_closed=lambda: bool(getattr(page, "closed", False)),
+            branch_text=lambda: branch_pill.text().strip(),
+        )
+        repo_inner.addTab(deps_pane, "Dependencies")
+
+        def _on_repo_inner_changed(index: int) -> None:
+            if index == 1 and hasattr(deps_pane, "ensure_scanned"):
+                deps_pane.ensure_scanned()
+
+        repo_inner.currentChanged.connect(_on_repo_inner_changed)
+        page_layout.addWidget(repo_inner, 1)
 
         def set_busy(busy: bool) -> None:
             state["busy"] = busy
