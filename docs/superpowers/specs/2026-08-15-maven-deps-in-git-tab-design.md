@@ -20,6 +20,7 @@ When a repository is opened in Git, show a **Dependencies** view of every **decl
 | Remote / network | **None** — no fetch, no Maven Central, no API version checks |
 | Group rollup | Out of scope v1 (per-repo only) |
 | Maven CLI | Not required for v1 |
+| Export | **Download as HTML** — self-contained report of the current filtered view |
 
 ## Layout
 
@@ -42,13 +43,14 @@ Opened repo tab:
 │ • ledger-core    │ groupId (Family) │ artifactId │ Version │ Scope │ … │
 │ • …              │ (sortable columns; virtualized / fast filter)       │
 └──────────────────┴─────────────────────────────────────────────────────┘
-Footer: N dependencies · M modules · Refresh
+Footer: N dependencies · M modules · Refresh · Download HTML
 ```
 
 - Left **Modules** list filters the table; **All** shows the whole reactor.  
 - Search is instant (debounce ~150ms).  
 - Sort by groupId / artifactId / version / scope / module.  
 - **Unique GAV** collapses same groupId:artifactId:version across modules (show module count); **Per-module** is one row per declaration.
+- **Download HTML** — file-save dialog; writes a self-contained `.html` of the **currently visible** rows (respects module filter, search, scope, sort). Includes repo path, branch name (from local HEAD if available), timestamp, and columns groupId / artifactId / version / scope / module. No network assets required (inline CSS).
 
 ## Scan behavior
 
@@ -100,4 +102,5 @@ No persistence for v1.
 
 - Open a multi-module Maven repo → **Dependencies** lists declared deps with **groupId, artifactId, version**.  
 - Module filter, search, and column sort work with 200+ rows without UI freeze.  
+- **Download HTML** saves a readable offline report of the current view.  
 - Refresh re-scans; Git ops tab unchanged.
