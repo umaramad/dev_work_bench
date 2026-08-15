@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from typing import Any
@@ -522,18 +523,18 @@ def build_view(icons, ctx=None) -> QWidget:
         open_btn.clicked.connect(lambda _checked=False, p=path: open_folder(p, demo=demo))
         actions.addWidget(open_btn)
         if not demo:
-            fetch_btn = icon_button(icons, "download", "Fetch this repository")
-            fetch_btn.setObjectName("cardFetchButton")
-            fetch_btn.clicked.connect(
-                lambda _checked=False, p=path: fetch_repo(p, fetch_btn, status_label)
-            )
-            actions.addWidget(fetch_btn)
-            status_refresh = icon_button(icons, "refresh", "Refresh remote status")
-            status_refresh.setObjectName("cardStatusRefresh")
-            status_refresh.clicked.connect(
-                lambda _checked=False, p=path: refresh_card_status(p)
-            )
-            actions.addWidget(status_refresh)
+            vscode_btn = icon_button(icons, "open", "Open in VS Code")
+            vscode_btn.setObjectName("cardOpenVscode")
+            vscode_btn.clicked.connect(lambda _checked=False, p=path: open_in_vscode(p))
+            actions.addWidget(vscode_btn)
+            finder_btn = icon_button(icons, "folder", "Reveal in Finder")
+            finder_btn.setObjectName("cardRevealFinder")
+            finder_btn.clicked.connect(lambda _checked=False, p=path: reveal_in_finder(p))
+            actions.addWidget(finder_btn)
+            terminal_btn = icon_button(icons, "terminal", "Open in Terminal")
+            terminal_btn.setObjectName("cardOpenTerminal")
+            terminal_btn.clicked.connect(lambda _checked=False, p=path: open_in_terminal(p))
+            actions.addWidget(terminal_btn)
             edit_btn = icon_button(icons, "edit", "Edit repository")
             edit_btn.setObjectName("editRepoButton")
             edit_btn.clicked.connect(lambda _checked=False, p=path: edit_repository(p))
@@ -971,6 +972,15 @@ def build_view(icons, ctx=None) -> QWidget:
         menu.addAction("Open").triggered.connect(
             lambda _checked=False, p=path: open_folder(p)
         )
+        menu.addAction("Open in VS Code").triggered.connect(
+            lambda _checked=False, p=path: open_in_vscode(p)
+        )
+        menu.addAction("Reveal in Finder").triggered.connect(
+            lambda _checked=False, p=path: reveal_in_finder(p)
+        )
+        menu.addAction("Open in Terminal").triggered.connect(
+            lambda _checked=False, p=path: open_in_terminal(p)
+        )
         favorite = favorites_repo.find("folder", path) if favorites_repo is not None else None
         if favorite is not None:
             menu.addSeparator()
@@ -982,74 +992,94 @@ def build_view(icons, ctx=None) -> QWidget:
             )
         menu.popup(favorites_list.mapToGlobal(position))
 
+    def open_in_vscode(path: str) -> None:
+        """Open the repository folder in Visual Studio Code (``code`` CLI or .app)."""
+        if not path or not os.path.isdir(path):
+            console_append(f"  · path not found: {path}", ok=False)
+            return
+        # Prefer `code` on PATH (VS Code / Cursor shell command).
+        try:
+            proc = subprocess.run(
+                ["code", path],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if proc.returncode == 0:
+                console_append(f"  ✓ opened in VS Code — {path}", ok=True)
+                return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        # macOS app bundle fallbacks
+        for app in (
+            "Visual Studio Code",
+            "Visual Studio Code - Insiders",
+            "Code",
+        ):
+            try:
+                proc = subprocess.run(
+                    ["open", "-na", app, "--args", path],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                if proc.returncode == 0:
+                    console_append(f"  ✓ opened in {app} — {path}", ok=True)
+                    return
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        console_append(
+            "  ✕ could not open VS Code — install the “code” shell command "
+            "(VS Code → Command Palette → “Shell Command: Install 'code' command in PATH”)",
+            ok=False,
+        )
+
+    def reveal_in_finder(path: str) -> None:
+        """Reveal the repository folder in Finder."""
+        if not path or not os.path.isdir(path):
+            console_append(f"  · path not found: {path}", ok=False)
+            return
+        try:
+            subprocess.run(["open", path], check=False, timeout=15)
+            console_append(f"  ✓ revealed in Finder — {path}", ok=True)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            console_append(f"  ✕ Finder: {exc}", ok=False)
+
+    def open_in_terminal(path: str) -> None:
+        """Open a Terminal window with cwd set to the repository."""
+        if not path or not os.path.isdir(path):
+            console_append(f"  · path not found: {path}", ok=False)
+            return
+        # Pass path as argv so spaces/quotes are safe.
+        script = (
+            "on run argv\n"
+            "  set p to item 1 of argv\n"
+            '  tell application "Terminal"\n'
+            "    activate\n"
+            '    do script "cd " & quoted form of p\n'
+            "  end tell\n"
+            "end run"
+        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", script, path],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if proc.returncode == 0:
+                console_append(f"  ✓ opened Terminal — {path}", ok=True)
+            else:
+                err = (proc.stderr or proc.stdout or "failed").strip()
+                console_append(f"  ✕ Terminal: {err[:160]}", ok=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            console_append(f"  ✕ Terminal: {exc}", ok=False)
+
     def remove_favorite(path: str) -> None:
         if favorites_repo is not None:
             favorites_repo.remove_ref("folder", path)
         status_cache.pop(path, None)  # don't keep a stale entry for unpinned repos
         refresh_favorites()
-
-    def fetch_repo(path: str, fetch_btn, status_label) -> None:
-        """Run ``git fetch`` for one repository straight from its card.
-
-        No tab is opened: the card's button disables while the fetch runs and
-        the outcome is reported on the card itself. Repeat clicks during a
-        run are ignored (``_fetching`` flag).
-        """
-        if getattr(fetch_btn, "_fetching", False):
-            return
-        fetch_btn._fetching = True
-        fetch_btn.setEnabled(False)
-        fetch_btn.setToolTip("Fetching…")
-        status_label.setText("Fetching…")
-        status_label.show()
-        console_append(f"$ git fetch — {path}")
-        set_console_status("git fetch…")
-
-        worker = GitWorker("fetch", path, executable=git_exe())
-        home_workers.append(worker)
-
-        def done(result, current=worker) -> None:
-            if current in home_workers:
-                home_workers.remove(current)
-            ok = bool(result.get("ok"))
-            output = str(result.get("output", ""))
-            summary = (output.strip().splitlines() or ["ok" if ok else "failed"])[0]
-            console_append(f"  {'✓' if ok else '✕'} {summary[:200]}", ok=ok)
-            if not landing_state["bulk_busy"]:
-                set_console_status("idle")
-            _finish_fetch(
-                fetch_btn, status_label, ok, output, path,
-            )
-
-        def failed(exc, current=worker) -> None:
-            if current in home_workers:
-                home_workers.remove(current)
-            console_append(f"  ✕ {exc}", ok=False)
-            if not landing_state["bulk_busy"]:
-                set_console_status("idle")
-            _finish_fetch(fetch_btn, status_label, False, str(exc), path)
-
-        worker.signals.finished.connect(done)
-        worker.signals.error.connect(failed)
-        QThreadPool.globalInstance().start(worker)
-
-    def _finish_fetch(fetch_btn, status_label, ok: bool, output: str, path: str) -> None:
-        """Report a short fetch result on the card, then auto-clear it.
-
-        The landing list may be rebuilt while a fetch runs (e.g. a repo tab
-        opens and auto-pins, refreshing the cards) — a RuntimeError means the
-        old card is gone and there is nothing left to update.
-        """
-        try:
-            fetch_btn._fetching = False
-            fetch_btn.setEnabled(True)
-            fetch_btn.setToolTip("Fetch this repository")
-            _show_card_toast(status_label, "Fetched" if ok else "Fetch failed", ok=ok, path=path)
-        except RuntimeError:
-            pass  # the card was rebuilt while the fetch ran
-        # A fetch may have moved ahead/behind — refresh the card's remote
-        # status (cache-only if the card was rebuilt in the meantime).
-        refresh_card_status(path)
 
     # -------------------------------------------------------- console + bulk
     def set_console_status(text: str) -> None:
@@ -1566,6 +1596,13 @@ def build_view(icons, ctx=None) -> QWidget:
                 lambda _checked=False, a=dict(action): run_group_action(a)
             )
         actions_menu.addSeparator()
+        packs = actions_menu.addMenu("Packs")
+        pack_act = packs.addAction("Add → Commit → Push")
+        pack_act.setToolTip(
+            "git add . · commit with one message · git push — for every repo in this group"
+        )
+        pack_act.triggered.connect(run_pack_add_commit_push)
+        actions_menu.addSeparator()
         edit_act = actions_menu.addAction("Edit actions…")
         edit_act.triggered.connect(_edit_group_actions_dialog)
         copy_act = actions_menu.addAction("Copy actions to groups…")
@@ -1641,6 +1678,52 @@ def build_view(icons, ctx=None) -> QWidget:
             + (f", skipped {skipped} duplicate label(s)" if skipped else ""),
             ok=True,
         )
+
+    def run_pack_add_commit_push() -> None:
+        """Built-in pack: git add . → commit (one message) → push per group repo."""
+        if landing_state["bulk_busy"]:
+            return
+        group = landing_state["group"]
+        if group in (None, "__demo__"):
+            return
+        members = favorites_for_group()
+        if not members:
+            console_append("  · no repositories in this group", ok=False)
+            return
+        dialog = ActionPlaceholdersDialog(
+            root, action_label="Add → Commit → Push", placeholders=["message"]
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        message = dialog.values().get("message", "").strip()
+        if not message:
+            return
+        # Escape for shell-style argv via shlex in run_cmd — use simple quoting.
+        safe_msg = message.replace('"', '\\"')
+        steps = [
+            "git add .",
+            f'git commit -m "{safe_msg}"',
+            "git push",
+        ]
+        paths = [favorite.ref for favorite in members]
+        landing_state["bulk_busy"] = True
+        bulk_queue[:] = list(paths)
+        bulk_meta.update({
+            "op": "action_pack",
+            "label": "Add → Commit → Push",
+            "steps": steps,
+            "step_index": 0,
+            "pack_path": "",
+            "done": 0,
+            "total": len(paths),
+            "ok": 0,
+        })
+        _set_bulk_enabled(False)
+        console_append(
+            f"$ pack Add→Commit→Push — {len(paths)} repos in {group or 'Ungrouped'}"
+        )
+        set_console_status(f"pack 0/{len(paths)}…")
+        _run_next_group_action()
 
     def run_group_action(action: dict) -> None:
         """Run one custom action across every repo in the selected group."""
@@ -1727,6 +1810,17 @@ def build_view(icons, ctx=None) -> QWidget:
         _run_next_group_action()
 
     def _run_next_group_action() -> None:
+        if not bulk_queue and not (
+            bulk_meta.get("op") == "action_pack" and bulk_meta.get("pack_path")
+        ):
+            _finish_group_action()
+            return
+
+        # Multi-step pack: finish steps for current pack_path before next repo.
+        if bulk_meta.get("op") == "action_pack":
+            _run_next_pack_step()
+            return
+
         if not bulk_queue:
             _finish_group_action()
             return
@@ -1763,6 +1857,86 @@ def build_view(icons, ctx=None) -> QWidget:
             console_append(f"  ✕ {err}", ok=False)
             _set_card_op_status(p, f"{op_label} failed — {err[:100]}", ok=False)
             _run_next_group_action()
+
+        worker.signals.finished.connect(done)
+        worker.signals.error.connect(failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _commit_nothing_to_commit(output: str) -> bool:
+        text = (output or "").lower()
+        return (
+            "nothing to commit" in text
+            or "no changes added to commit" in text
+            or "working tree clean" in text
+        )
+
+    def _run_next_pack_step() -> None:
+        steps = list(bulk_meta.get("steps") or [])
+        path = str(bulk_meta.get("pack_path") or "")
+        step_index = int(bulk_meta.get("step_index") or 0)
+        label = str(bulk_meta.get("label") or "Pack")
+
+        if not path:
+            if not bulk_queue:
+                _finish_group_action()
+                return
+            path = bulk_queue.pop(0)
+            bulk_meta["pack_path"] = path
+            bulk_meta["step_index"] = 0
+            bulk_meta["done"] += 1
+            step_index = 0
+            set_console_status(f"{label} {bulk_meta['done']}/{bulk_meta['total']}…")
+            _set_card_op_status(path, f"{label}…")
+
+        if step_index >= len(steps):
+            bulk_meta["ok"] += 1
+            _set_card_op_status(path, f"{label} · ok", ok=True)
+            refresh_card_status(path)
+            bulk_meta["pack_path"] = ""
+            bulk_meta["step_index"] = 0
+            _run_next_pack_step()
+            return
+
+        command = str(steps[step_index])
+        console_append(f"$ {command} — {path}")
+        worker = GitWorker("run_cmd", path, args=(command,), executable=git_exe())
+        bulk_workers.append(worker)
+
+        def done(result, current=worker, p=path, cmd=command, idx=step_index) -> None:
+            if current in bulk_workers:
+                bulk_workers.remove(current)
+            ok = bool(isinstance(result, dict) and result.get("ok"))
+            output = str((result or {}).get("output") or "").strip() if isinstance(result, dict) else ""
+            summary = next(
+                (line.strip() for line in output.splitlines() if line.strip()),
+                "ok" if ok else "failed",
+            )
+            soft_ok = (not ok) and cmd.startswith("git commit") and _commit_nothing_to_commit(output)
+            if ok or soft_ok:
+                console_append(
+                    f"  ✓ {summary[:200]}" + (" (nothing to commit)" if soft_ok else ""),
+                    ok=True,
+                )
+                bulk_meta["step_index"] = idx + 1
+                _run_next_pack_step()
+                return
+            console_append(f"  ✕ {summary[:200]}", ok=False)
+            _set_card_op_status(p, f"{label} failed — {summary[:100]}", ok=False)
+            refresh_card_status(p)
+            # Abort remaining steps for this repo; continue with next repo.
+            bulk_meta["pack_path"] = ""
+            bulk_meta["step_index"] = 0
+            _run_next_pack_step()
+
+        def failed(exc, current=worker, p=path) -> None:
+            if current in bulk_workers:
+                bulk_workers.remove(current)
+            err = str(exc)
+            console_append(f"  ✕ {err}", ok=False)
+            _set_card_op_status(p, f"{label} failed — {err[:100]}", ok=False)
+            bulk_meta["pack_path"] = ""
+            bulk_meta["step_index"] = 0
+            _run_next_pack_step()
 
         worker.signals.finished.connect(done)
         worker.signals.error.connect(failed)
@@ -2207,6 +2381,7 @@ def build_view(icons, ctx=None) -> QWidget:
             pending_workers=pending,
             is_closed=lambda: bool(getattr(page, "closed", False)),
             branch_text=lambda: branch_pill.text().strip(),
+            git_executable=git_exe,
         )
         repo_inner.addTab(deps_pane, "Dependencies")
 

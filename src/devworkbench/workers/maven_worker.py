@@ -503,3 +503,230 @@ class MavenPomWorker(Worker):
 
     def work(self):
         return scan_declared_dependencies(self._path)
+
+
+def enrich_dependency_rows(rows: list[dict]) -> list[dict]:
+    """Add used_in_n, used_in_modules, conflict flags to each row (by groupId+artifactId)."""
+    by_ga: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        key = (str(row.get("group_id") or ""), str(row.get("artifact_id") or ""))
+        by_ga.setdefault(key, []).append(row)
+
+    enriched: list[dict] = []
+    for row in rows:
+        key = (str(row.get("group_id") or ""), str(row.get("artifact_id") or ""))
+        peers = by_ga.get(key) or [row]
+        modules = sorted({str(r.get("module_id") or "") for r in peers if r.get("module_id")})
+        versions = sorted({str(r.get("version") or "") for r in peers if str(r.get("version") or "").strip()})
+        item = dict(row)
+        item["used_in_n"] = len(modules)
+        item["used_in_modules"] = modules
+        item["conflict"] = len(versions) >= 2
+        item["conflict_versions"] = versions
+        enriched.append(item)
+    return enriched
+
+
+def family_prefix(group_id: str, segments: int = 2) -> str:
+    parts = [p for p in str(group_id or "").split(".") if p]
+    if len(parts) <= segments:
+        return str(group_id or "")
+    return ".".join(parts[:segments])
+
+
+def top_families(rows: list[dict], *, limit: int = 10) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        fam = family_prefix(str(row.get("group_id") or ""))
+        if not fam:
+            continue
+        counts[fam] = counts.get(fam, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].casefold()))
+    return ranked[:limit]
+
+
+def dependencies_to_csv(rows: list[dict]) -> str:
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        ["groupId", "artifactId", "version", "scope", "module", "managed", "used_in_n", "conflict"]
+    )
+    for row in rows:
+        writer.writerow(
+            [
+                row.get("group_id") or "",
+                row.get("artifact_id") or "",
+                row.get("version") or "",
+                row.get("scope") or "",
+                row.get("module_id") or "",
+                "yes" if row.get("managed") else "",
+                row.get("used_in_n") if row.get("used_in_n") is not None else "",
+                "yes" if row.get("conflict") else "",
+            ]
+        )
+    return buf.getvalue()
+
+
+def gav_string(row: dict) -> str:
+    return (
+        f"{row.get('group_id') or ''}:"
+        f"{row.get('artifact_id') or ''}:"
+        f"{row.get('version') or ''}"
+    )
+
+
+def maven_xml_snippet(row: dict) -> str:
+    lines = [
+        "<dependency>",
+        f"  <groupId>{row.get('group_id') or ''}</groupId>",
+        f"  <artifactId>{row.get('artifact_id') or ''}</artifactId>",
+    ]
+    if row.get("version"):
+        lines.append(f"  <version>{row.get('version')}</version>")
+    scope = row.get("scope") or "compile"
+    if scope and scope != "compile":
+        lines.append(f"  <scope>{scope}</scope>")
+    lines.append("</dependency>")
+    return "\n".join(lines)
+
+
+def list_local_branches(repo_path: str, executable: str = "git") -> list[str]:
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [executable, "branch", "--format=%(refname:short)"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def current_branch_name(repo_path: str, executable: str = "git") -> str:
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [executable, "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    name = (proc.stdout or "").strip()
+    return "" if name == "HEAD" else name
+
+
+def scan_repo_at_ref(repo_path: str, ref: str, executable: str = "git") -> dict:
+    """Scan declared deps for ``ref`` via a temporary detached worktree (local only)."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    repo_path = os.path.abspath(repo_path)
+    tmp = tempfile.mkdtemp(prefix="dwb-maven-wt-")
+    try:
+        add = subprocess.run(
+            [executable, "worktree", "add", "--detach", tmp, ref],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if add.returncode != 0:
+            raise RuntimeError((add.stderr or add.stdout or "worktree add failed").strip())
+        result = scan_declared_dependencies(tmp)
+        result["ref"] = ref
+        return result
+    finally:
+        subprocess.run(
+            [executable, "worktree", "remove", "--force", tmp],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def diff_dependency_scans(scan_a: dict, scan_b: dict) -> list[dict]:
+    """Compare two scans by groupId+artifactId (versions aggregated across modules)."""
+
+    def index(scan: dict) -> dict[tuple[str, str], set[str]]:
+        out: dict[tuple[str, str], set[str]] = {}
+        for row in scan.get("dependencies") or []:
+            key = (str(row.get("group_id") or ""), str(row.get("artifact_id") or ""))
+            if not key[0] or not key[1]:
+                continue
+            out.setdefault(key, set())
+            ver = str(row.get("version") or "").strip()
+            if ver:
+                out[key].add(ver)
+        return out
+
+    a = index(scan_a)
+    b = index(scan_b)
+    keys = sorted(set(a) | set(b), key=lambda k: (k[0].casefold(), k[1].casefold()))
+    rows: list[dict] = []
+    for key in keys:
+        va = sorted(a.get(key) or [])
+        vb = sorted(b.get(key) or [])
+        if key not in a:
+            change = "added"
+        elif key not in b:
+            change = "removed"
+        elif va != vb:
+            change = "version_changed"
+        else:
+            continue
+        rows.append(
+            {
+                "group_id": key[0],
+                "artifact_id": key[1],
+                "version_a": ", ".join(va) if va else "—",
+                "version_b": ", ".join(vb) if vb else "—",
+                "change": change,
+            }
+        )
+    return rows
+
+
+class MavenCompareWorker(Worker):
+    """Compare declared dependencies between two local git refs via worktrees."""
+
+    def __init__(
+        self,
+        path: str,
+        branch_a: str,
+        branch_b: str,
+        executable: str = "git",
+    ) -> None:
+        super().__init__()
+        self._path = path
+        self._branch_a = branch_a
+        self._branch_b = branch_b
+        self._executable = executable
+
+    def work(self):
+        scan_a = scan_repo_at_ref(self._path, self._branch_a, self._executable)
+        scan_b = scan_repo_at_ref(self._path, self._branch_b, self._executable)
+        return {
+            "branch_a": self._branch_a,
+            "branch_b": self._branch_b,
+            "diff": diff_dependency_scans(scan_a, scan_b),
+            "count_a": len(scan_a.get("dependencies") or []),
+            "count_b": len(scan_b.get("dependencies") or []),
+        }
