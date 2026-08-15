@@ -16,8 +16,10 @@ When a repository is opened in Git, show a **Dependencies** view of every **decl
 | Scan depth | Declared only (`<dependencies>` in each pom); no transitive tree |
 | Multi-module | Discover via root/`pom.xml` + `<modules>` (nested) |
 | Primary columns | **groupId**, **artifactId**, **version** |
+| Source of truth | **Local working tree only** — whatever branch/commit is checked out on disk |
+| Remote / network | **None** — no fetch, no Maven Central, no API version checks |
 | Group rollup | Out of scope v1 (per-repo only) |
-| Maven CLI / Central | Not required for v1 |
+| Maven CLI | Not required for v1 |
 
 ## Layout
 
@@ -52,11 +54,13 @@ Footer: N dependencies · M modules · Refresh
 
 Worker (off UI thread), triggered on first open of Dependencies and on **Refresh**:
 
-1. Resolve repo root path (opened folder).  
+1. Resolve repo root path (opened folder) — read files from the **local checkout** (current branch / dirty tree as on disk).  
 2. Collect `pom.xml` files: follow `<modules>` from parent poms; also accept nested poms under the tree, skipping `target/`, `.git`, `node_modules`.  
 3. Parse each pom (XML): module coordinates if present; each `<dependency>` → groupId, artifactId, version, scope (default `compile`), type (default `jar`).  
 4. Optionally note `<dependencyManagement>` entries as **managed** (version may come from BOM/parent; show version string or property placeholder as written).  
 5. Return list of rows to the UI.
+
+**No remote checks:** do not contact remotes, Maven Central, or other networks. Switching local branch and Refresh shows that branch’s poms.
 
 **Property placeholders** (e.g. `${jackson.version}`): show the literal property text in Version for v1 (no full property resolution required). Later enhancement: resolve from same pom / parent.
 
@@ -87,6 +91,7 @@ No persistence for v1.
 
 - Transitive / `mvn dependency:tree`  
 - “Latest version” / outdated badges (Maven Central)  
+- Any remote or network lookup for versions  
 - Group-level inventory across many repos  
 - Editing pom.xml  
 - Flet parity  
