@@ -232,11 +232,15 @@ class GitWorker(Worker):
 
         ``is_repo`` is False when ``path`` is not inside a working tree, so
         the UI can leave the card's status empty for plain folders.
+
+        A single ``git status`` doubles as the repo check — it fails cleanly
+        outside a working tree (and in bare repos), so no separate
+        ``rev-parse`` subprocess is needed. Halves the spawn cost of the
+        per-card status refresh on the landing page.
         """
-        check = self._git(("rev-parse", "--is-inside-work-tree"))
-        if not check["ok"]:
-            return {"is_repo": False, "branch": "", "ahead": 0, "behind": 0, "upstream": None}
         status = self._git(("status", "--short", "--branch"))
+        if not status["ok"]:
+            return {"is_repo": False, "branch": "", "ahead": 0, "behind": 0, "upstream": None}
         branch = ""
         ahead = 0
         behind = 0

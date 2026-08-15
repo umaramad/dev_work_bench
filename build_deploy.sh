@@ -4,10 +4,10 @@
 #   ./build_deploy.sh              # interactive menu
 #   ./build_deploy.sh local        # run the PySide6 UI from source (dev mode)
 #   ./build_deploy.sh flet         # run the Flet UI from source (needs Python 3.10+)
-#   ./build_deploy.sh build        # build release Flet .app only
-#   ./build_deploy.sh dmg          # build release Flet .app + portable .dmg
+#   ./build_deploy.sh build        # build release PySide6 .app only
+#   ./build_deploy.sh dmg          # build release PySide6 .app + portable .dmg
 #   ./build_deploy.sh debug        # build debug Flet .app (console visible)
-#   ./build_deploy.sh qt           # build PySide6 .app (not used for DMG)
+#   ./build_deploy.sh qt           # alias for 'build' (PySide6 .app)
 #   ./build_deploy.sh tests        # run the test suite
 #   ./build_deploy.sh bump [patch|minor|major]   # bump version
 #   ./build_deploy.sh version      # print current version
@@ -79,10 +79,10 @@ run_flet() {
 }
 
 build_release() {
-    require_venv; require_flet; require_pyinstaller
-    ok "building release Flet .app v$VERSION"
-    scripts/build.sh release
-    ok "done: dist/DevWorkbench.app  (Flet UI)"
+    require_venv; require_pyinstaller
+    ok "building release PySide6 .app v$VERSION"
+    scripts/build.sh qt
+    ok "done: dist/DevWorkbench.app  (PySide6 UI)"
 }
 
 build_debug() {
@@ -93,20 +93,17 @@ build_debug() {
 }
 
 build_qt() {
-    require_venv; require_pyinstaller
-    ok "building PySide6 .app v$VERSION"
-    scripts/build.sh qt
-    ok "done: dist/DevWorkbench.app  (PySide6 UI — not used for DMG)"
+    build_release
 }
 
 build_dmg() {
     build_release
     [[ -d dist/DevWorkbench.app ]] || die "dist/DevWorkbench.app not found — run 'build' first"
-    ok "packaging portable DMG (Flet UI)"
+    ok "packaging portable DMG (PySide6 UI)"
     scripts/make_dmg.sh
     ok "done: dist/DevWorkbench-$VERSION.dmg  (drag into /Applications)"
     note "verify: hdiutil verify dist/DevWorkbench-$VERSION.dmg"
-    note "the .app inside launches the Flet UI; local run uses PySide6 (./build_deploy.sh local)"
+    note "the .app inside launches the PySide6 UI; the Flet UI stays available via ./build_deploy.sh flet"
 }
 
 run_tests() {
@@ -140,8 +137,8 @@ doctor() {
     require_venv
     echo "${C_BOLD}prerequisites:${C_RESET}"
     note "  python : $($PYTHON --version 2>&1)"
-    if "$PYTHON" -c "import PySide6" 2>/dev/null; then note "  PySide6: present (local run)"; else note "  PySide6: ${C_RED}missing${C_RESET} (needed for ./build_deploy.sh local)"; fi
-    if "$PYTHON" -c "import flet" 2>/dev/null; then note "  Flet: present (optional — ./build_deploy.sh flet / DMG)"; else note "  Flet: absent (optional — needs Python 3.10+)"; fi
+    if "$PYTHON" -c "import PySide6" 2>/dev/null; then note "  PySide6: present (local run / DMG)"; else note "  PySide6: ${C_RED}missing${C_RESET} (needed for ./build_deploy.sh local / DMG)"; fi
+    if "$PYTHON" -c "import flet" 2>/dev/null; then note "  Flet: present (optional — ./build_deploy.sh flet)"; else note "  Flet: absent (optional — needs Python 3.10+)"; fi
     if [[ -x .venv/bin/flet ]]; then note "  flet CLI: present"; else note "  flet CLI: absent"; fi
     if "$PYTHON" -c "import PyInstaller" 2>/dev/null; then note "  PyInstaller: present"; else note "  PyInstaller: ${C_RED}missing${C_RESET} (needed for build/dmg)"; fi
     echo
@@ -153,8 +150,8 @@ menu() {
     banner
     echo "${C_BOLD}Choose an option:${C_RESET}"
     echo "  ${C_CYN}1${C_RESET}) Run locally — PySide6 UI (from source)"
-    echo "  ${C_CYN}2${C_RESET}) Build release Flet .app"
-    echo "  ${C_CYN}3${C_RESET}) Build release Flet .app + portable DMG"
+    echo "  ${C_CYN}2${C_RESET}) Build release PySide6 .app"
+    echo "  ${C_CYN}3${C_RESET}) Build release PySide6 .app + portable DMG"
     echo "  ${C_CYN}4${C_RESET}) Build debug Flet .app (console visible)"
     echo "  ${C_CYN}5${C_RESET}) Run tests"
     echo "  ${C_CYN}6${C_RESET}) Bump version (patch)"

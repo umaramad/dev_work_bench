@@ -216,6 +216,8 @@ SCHEMA: list[SettingDef] = [
         dict(key="git.home.branch", label="Git home selected branch", kind=SettingKind.STRING, default="main"),
         dict(key="git.home.group_actions", label="Git home per-group actions", kind=SettingKind.STRING,
              default="{}"),
+        dict(key="git.home.last_refresh", label="Git home per-group last status refresh",
+             kind=SettingKind.STRING, default="{}"),
     ),
     # -------------------------------------------------------------------- AI
     *_defs(

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Package dist/DevWorkbench.app into a portable, internet-safe .dmg.
 #
-#   ./scripts/build.sh            # first: produce Flet dist/DevWorkbench.app
+#   ./scripts/build.sh qt         # first: produce PySide6 dist/DevWorkbench.app
 #   ./scripts/make_dmg.sh         # -> dist/DevWorkbench-<version>.dmg
 #
-# The .app is expected to be the Flet UI (scripts/build.sh release / flet pack).
+# The .app is expected to be the PySide6 UI (scripts/build.sh qt); the DMG is
+# produced end-to-end by ./build_deploy.sh dmg.
 #
 # The DMG gets a modern layout: the app plus a symlink to /Applications, so
 # the user drags the icon into Applications and it "just works". Everything

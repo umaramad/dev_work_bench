@@ -101,11 +101,15 @@ class GitService:
         return {"ok": result["ok"], "rows": rows}
 
     async def remote_status(self, path: str) -> dict:
-        """Branch + ahead/behind vs upstream — local-only (no network)."""
-        check = await self._git(("rev-parse", "--is-inside-work-tree"), path)
-        if not check["ok"]:
-            return {"is_repo": False, "branch": "", "ahead": 0, "behind": 0, "upstream": None}
+        """Branch + ahead/behind vs upstream — local-only (no network).
+
+        A single ``git status`` doubles as the repo check — it fails cleanly
+        outside a working tree (and in bare repos), so no separate
+        ``rev-parse`` subprocess is needed (matches GitWorker).
+        """
         status = await self._git(("status", "--short", "--branch"), path)
+        if not status["ok"]:
+            return {"is_repo": False, "branch": "", "ahead": 0, "behind": 0, "upstream": None}
         branch = ""
         ahead = 0
         behind = 0

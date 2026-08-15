@@ -15,10 +15,12 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
+from typing import Any
 
-from PySide6.QtCore import QSize, QThreadPool, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QTextCursor
+from PySide6.QtCore import QRectF, QSize, QThreadPool, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -63,8 +65,23 @@ logger = logging.getLogger("devworkbench.modules.git")
 # Fixed card row height keeps the favorites list scroll smooth while status
 # pills / toasts update (no per-update sizeHint thrashing).
 _CARD_ROW_HEIGHT = 118
+# Cards materialized per batch on the landing. The full filtered member list
+# lives in ``landing_state["members"]``; only this many card widgets exist at
+# a time, and scrolling near the bottom loads the next batch (lazy
+# pagination for very large groups).
+_LANDING_CHUNK = 80
 _PLACEHOLDER_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 _DEFAULT_GROUP_ACTIONS = (
+    ("Add", "git add ."),
+    ("Commit", 'git commit -m "{{message}}"'),
+    ("Push", "git push"),
+    ("Branch", "git checkout -b {{branch}}"),
+)
+# The exact default set before "Branch" existed — groups seeded before the
+# upgrade keep the old three actions in storage, so ``_actions_for_group``
+# migrates an untouched legacy set to the current defaults instead of
+# silently missing the new option.
+_LEGACY_DEFAULT_ACTIONS = (
     ("Add", "git add ."),
     ("Commit", 'git commit -m "{{message}}"'),
     ("Push", "git push"),
@@ -78,6 +95,61 @@ def _bump_font(widget, delta: int = 2, min_pt: int = 13, *, bold: bool | None = 
     if bold is not None:
         font.setBold(bold)
     widget.setFont(font)
+
+
+class DriftBar(QWidget):
+    """Tiny 3-segment health bar for a group row: clean / ahead / behind.
+
+    The signature element of the landing — fleet health at a glance, using
+    the app's semantic duotone (green = clean, amber = your commits ahead,
+    cyan = upstream commits behind). Diverged repos count toward both amber
+    and cyan, which is literally what ``git status`` reports.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("groupDriftBar")
+        self.setFixedSize(64, 6)
+        self._segments = (0, 0, 0)  # clean, ahead, behind
+        self.setToolTip("")
+
+    def set_segments(self, clean: int, ahead: int, behind: int) -> None:
+        self._segments = (max(0, clean), max(0, ahead), max(0, behind))
+        total = sum(self._segments)
+        if total:
+            self.setToolTip(
+                f"{clean} clean · {ahead} ahead · {behind} behind"
+            )
+        else:
+            self.setToolTip("")
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        colors = current_colors()
+        track = QColor(colors["surface2"])
+        clean, ahead, behind = self._segments
+        total = clean + ahead + behind
+        w, h, gap = self.width(), self.height(), 2
+        radius = h / 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track)
+        painter.drawRoundedRect(self.rect(), radius, radius)
+        if total == 0:
+            return
+        usable = w - gap * 2
+        widths = [count / total * usable for count in (clean, ahead, behind)]
+        x = 0.0
+        for count, width, token in zip(
+            (clean, ahead, behind), widths, ("green", "amber", "cyan")
+        ):
+            if count <= 0 or width <= 0:
+                continue
+            painter.setBrush(QColor(colors[token]))
+            painter.drawRoundedRect(QRectF(x, 0.0, width, h), radius, radius)
+            x += width + gap
+        painter.end()
 
 
 def build_view(icons, ctx=None) -> QWidget:
@@ -165,7 +237,8 @@ def build_view(icons, ctx=None) -> QWidget:
     groups_pane_layout.setContentsMargins(0, 0, 0, 0)
     groups_pane_layout.setSpacing(6)
     groups_heading = styled_label("Groups", "hint")
-    _bump_font(groups_heading, 2, 13)
+    groups_heading.setObjectName("groupsHeading")
+    _bump_font(groups_heading, 0, 12, bold=True)
     groups_pane_layout.addWidget(groups_heading)
     groups_list = QListWidget()
     groups_list.setObjectName("groupList")
@@ -193,6 +266,13 @@ def build_view(icons, ctx=None) -> QWidget:
     repos_title.setObjectName("groupTitle")
     _bump_font(repos_title, 3, 16, bold=True)
     repos_pane_layout.addWidget(repos_title)
+
+    # The two action rows read as one “command deck” (see QSS #commandDeck).
+    command_deck = QWidget()
+    command_deck.setObjectName("commandDeck")
+    command_deck_layout = QVBoxLayout(command_deck)
+    command_deck_layout.setContentsMargins(8, 8, 8, 8)
+    command_deck_layout.setSpacing(6)
 
     # Shared branch list (common for all repos) + checkout/fetch for the group.
     branch_bar = QWidget()
@@ -231,7 +311,7 @@ def build_view(icons, ctx=None) -> QWidget:
     branch_edit.setToolTip("Configure the shared list of branch names")
     _bump_font(branch_edit, 2, 13)
     branch_layout.addWidget(branch_edit)
-    repos_pane_layout.addWidget(branch_bar)
+    command_deck_layout.addWidget(branch_bar)
 
     bulk_bar = QWidget()
     bulk_bar.setObjectName("bulkBar")
@@ -250,6 +330,17 @@ def build_view(icons, ctx=None) -> QWidget:
     bulk_reset.setObjectName("bulkResetButton")
     bulk_reset.setToolTip("Run soft git reset on every repository in this group")
     _bump_font(bulk_reset, 2, 13)
+    refresh_status = button("Refresh status", "ghost")
+    refresh_status.setObjectName("refreshStatusButton")
+    refresh_status.setToolTip(
+        "Fetch branch + ahead/behind for every repo in this group (on demand)"
+    )
+    _bump_font(refresh_status, 2, 13)
+    last_refresh_label = styled_label("", "hint")
+    last_refresh_label.setObjectName("lastRefreshLabel")
+    last_refresh_label.setProperty("role", "lastRefresh")
+    _bump_font(last_refresh_label, 1, 11)
+    last_refresh_label.hide()
     bulk_busy_label = styled_label("", "hint")
     bulk_busy_label.setObjectName("bulkBusyLabel")
     _bump_font(bulk_busy_label, 2, 13)
@@ -257,9 +348,12 @@ def build_view(icons, ctx=None) -> QWidget:
     bulk_layout.addWidget(bulk_fetch)
     bulk_layout.addWidget(bulk_status)
     bulk_layout.addWidget(bulk_reset)
+    bulk_layout.addWidget(refresh_status)
+    bulk_layout.addWidget(last_refresh_label)
     bulk_layout.addWidget(bulk_busy_label)
     bulk_layout.addStretch(1)
-    repos_pane_layout.addWidget(bulk_bar)
+    command_deck_layout.addWidget(bulk_bar)
+    repos_pane_layout.addWidget(command_deck)
 
     favorites_list = QListWidget()
     favorites_list.setObjectName("favoritesList")
@@ -339,13 +433,19 @@ def build_view(icons, ctx=None) -> QWidget:
     # signals deliver — see the Worker retention contract).
     home_workers: list = []
     # Selected group key ("" for Ungrouped, "__demo__" in demo mode).
-    landing_state = {
+    landing_state: dict[str, Any] = {
         "group": None,
         "console_open": False,
         "bulk_busy": False,
         "refreshing": False,
-        "status_gen": 0,
+        "chunk": 0,       # how many lazy batches have been materialized
+        "members": [],    # full filtered member list for the current group
+        "status_refreshing": False,  # on-demand status refresh in flight
     }
+    # Per-group epoch (seconds) of the last on-demand status refresh, loaded
+    # from ``git.home.last_refresh`` so the deck timestamp survives restarts.
+    last_refresh_map: dict[str, float] = {}
+    last_refresh_loaded = False
     # Last known remote status per repo path, rendered onto fresh cards after
     # a rebuild; refreshed on demand, after each fetch and on a timer.
     status_cache: dict[str, dict] = {}
@@ -366,16 +466,19 @@ def build_view(icons, ctx=None) -> QWidget:
         labels.setContentsMargins(0, 0, 0, 0)
 
         name = QLabel(label or os.path.basename(path.rstrip("/")) or path)
+        name.setObjectName("repoName")
         _bump_font(name, 3, 16, bold=True)
         name.setWordWrap(False)
         labels.addWidget(name)
 
-        path_text = QLabel(path)
-        path_text.setObjectName("hint")
+        path_text = QLabel()
+        path_text.setObjectName("repoPath")
+        # Flags before text — see styled_label: avoids the expensive re-layout.
+        path_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         path_text.setToolTip(path)
         path_text.setWordWrap(False)
-        path_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        _bump_font(path_text, 2, 13)
+        path_text.setText(path)
+        _bump_font(path_text, 1, 12)
         # Single-line elided path — full path stays in the tooltip.
         metrics = path_text.fontMetrics()
         path_text.setText(metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, 480))
@@ -479,10 +582,18 @@ def build_view(icons, ctx=None) -> QWidget:
         _bump_font(name_label, 2, 14, bold=True)
         name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         text_col.addWidget(name_label)
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        meta_row.setSpacing(8)
         count_label = styled_label(f"{count} {noun}", "hint")
-        _bump_font(count_label, 2, 12)
+        _bump_font(count_label, 1, 11)
         count_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        text_col.addWidget(count_label)
+        meta_row.addWidget(count_label)
+        drift_bar = DriftBar()
+        drift_bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        meta_row.addWidget(drift_bar)
+        meta_row.addStretch(1)
+        text_col.addLayout(meta_row)
         row_layout.addLayout(text_col, 1)
         item.setSizeHint(QSize(200, 56))
         groups_list.addItem(item)
@@ -514,10 +625,53 @@ def build_view(icons, ctx=None) -> QWidget:
         ordered = sorted(counts, key=lambda g: (g == "", g.casefold()))
         landing_state["group"] = ordered[0]
 
+    def _load_last_refresh_map() -> dict:
+        if service is None:
+            return {}
+        try:
+            raw = str(service.get("git.home.last_refresh") or "{}")
+            data = json.loads(raw) if isinstance(raw, str) else {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            logger.exception("failed to load git.home.last_refresh")
+            return {}
+
+    def _save_last_refresh_map() -> None:
+        if service is None:
+            return
+        try:
+            service.set("git.home.last_refresh", json.dumps(last_refresh_map))
+        except Exception:
+            logger.exception("failed to save git.home.last_refresh")
+
+    def _relative_refresh_text(epoch: float) -> str:
+        """"Updated 2 min ago"-style text for a stored refresh epoch."""
+        delta = max(0, int(time.time() - epoch))
+        if delta < 60:
+            return "updated just now"
+        if delta < 3600:
+            minutes = delta // 60
+            return f"updated {minutes} min ago" if minutes > 1 else "updated 1 min ago"
+        if delta < 86400:
+            hours = delta // 3600
+            return f"updated {hours} hr ago" if hours > 1 else "updated 1 hr ago"
+        days = delta // 86400
+        return f"updated {days} days ago" if days > 1 else "updated 1 day ago"
+
+    def _show_last_refresh(group: str | None) -> None:
+        """Show the deck timestamp for ``group`` if a refresh was ever done."""
+        epoch = last_refresh_map.get(str(group or "")) if group is not None else None
+        if epoch:
+            last_refresh_label.setText(_relative_refresh_text(float(epoch)))
+            last_refresh_label.show()
+        else:
+            last_refresh_label.hide()
+
     def _set_bulk_enabled(enabled: bool) -> None:
         bulk_fetch.setEnabled(enabled)
         bulk_status.setEnabled(enabled)
         bulk_reset.setEnabled(enabled)
+        refresh_status.setEnabled(enabled and not landing_state.get("status_refreshing"))
         branch_fetch.setEnabled(enabled and bool(branch_combo.currentText().strip()))
         branch_combo.setEnabled(not landing_state["bulk_busy"])
         branch_edit.setEnabled(not landing_state["bulk_busy"])
@@ -603,16 +757,26 @@ def build_view(icons, ctx=None) -> QWidget:
         ]
 
     def refresh_repo_cards() -> None:
-        """Rebuild only the right-hand repo list for the current group."""
+        """Rebuild only the right-hand repo list for the current group.
+
+        The full filtered member list is stored in ``landing_state["members"]``
+        but only the first chunk of cards is materialized; scrolling near the
+        bottom loads more (see ``_render_next_chunk`` / ``_maybe_load_more``).
+        That keeps very large groups (1000+ repos) responsive — a keystroke in
+        the search field rebuilds only the visible chunk, not every card.
+        """
         if landing_state.get("refreshing"):
             return
         landing_state["refreshing"] = True
-        # Invalidate staggered status timers from a previous group selection.
-        landing_state["status_gen"] = int(landing_state.get("status_gen") or 0) + 1
         favorites_list.setUpdatesEnabled(False)
         try:
             group = landing_state["group"]
             clear_list_widget(favorites_list)
+            landing_state["chunk"] = 0
+            landing_state["members"] = []
+            # Show the last-refresh timestamp for this group (persisted per
+            # group, so it survives restarts); none yet → stays hidden.
+            _show_last_refresh(group)
 
             if group is None:
                 repos_title.setText("Select a group")
@@ -650,13 +814,41 @@ def build_view(icons, ctx=None) -> QWidget:
                 _set_bulk_enabled(False)
                 return
             empty_state.hide()
-            for favorite in members:
-                add_card(favorite.ref, favorite.label, demo=False)
+            landing_state["members"] = members
+            _render_next_chunk()
             _set_bulk_enabled(not landing_state["bulk_busy"])
-            _render_card_statuses()
+            _update_group_drift_bars()
         finally:
             favorites_list.setUpdatesEnabled(True)
             landing_state["refreshing"] = False
+
+    def _render_next_chunk() -> None:
+        """Materialize the next batch of repo cards (lazy pagination)."""
+        members = landing_state.get("members") or []
+        start = int(landing_state.get("chunk") or 0) * _LANDING_CHUNK
+        if start >= len(members):
+            return
+        end = min(start + _LANDING_CHUNK, len(members))
+        for favorite in members[start:end]:
+            add_card(favorite.ref, favorite.label, demo=False)
+        landing_state["chunk"] = int(landing_state.get("chunk") or 0) + 1
+        # Push cached statuses onto the freshly added cards so their pills are
+        # populated without a separate worker round-trip.
+        _render_card_statuses()
+        # A short list (or a viewport already pinned to the bottom) finishes
+        # loading without waiting for another scroll event.
+        _maybe_load_more()
+
+    def _maybe_load_more() -> None:
+        """Append the next chunk when the user has scrolled near the bottom."""
+        if landing_state.get("refreshing"):
+            return
+        group = landing_state["group"]
+        if group in (None, "__demo__") or favorites_repo is None:
+            return
+        scrollbar = favorites_list.verticalScrollBar()
+        if scrollbar.maximum() - scrollbar.value() <= 60:
+            QTimer.singleShot(0, _render_next_chunk)
 
     def refresh_favorites() -> None:
         """Rebuild both panes: group list + cards for the selected group."""
@@ -677,10 +869,9 @@ def build_view(icons, ctx=None) -> QWidget:
         landing_state["group"] = key
         _sync_group_checked(key)
         # Only rebuild the repo pane — rebuilding groups on every click was janky.
+        # No git work here: with very large groups nothing hits the remote
+        # until the user explicitly asks (Status all, per-card refresh, fetch).
         refresh_repo_cards()
-        if landing_state["group"] not in (None, "__demo__") and not landing_state["bulk_busy"]:
-            # Let the list paint first, then kick off status workers.
-            QTimer.singleShot(0, refresh_all_statuses)
         persist_timer.start()
 
     def add_repository() -> None:
@@ -749,11 +940,14 @@ def build_view(icons, ctx=None) -> QWidget:
         refresh_favorites()
 
     def show_card_menu(position) -> None:
-        """Right-click menu on a repository card: Open / Edit / Remove.
+        """Right-click menu on a repository card: group actions + Open / Edit / Remove.
 
-        Built with the non-blocking ``popup`` pattern — every action calls
-        the same handler as the card's buttons, so the behavior is identical
-        to the buttons while staying testable (no modal ``exec`` loop).
+        The custom Actions configured for the selected group appear first so a
+        single repository can run them on its own — the same command set as the
+        top Actions button, just scoped to that card. Built with the
+        non-blocking ``popup`` pattern — every action calls the same handler as
+        the card's buttons, so the behavior is identical while staying testable
+        (no modal ``exec`` loop).
         """
         item = favorites_list.itemAt(position)
         if item is None or not item.flags():  # group headers are plain labels
@@ -762,6 +956,17 @@ def build_view(icons, ctx=None) -> QWidget:
         if not path:
             return
         menu = QMenu(favorites_list)
+        # Same custom actions as the top Actions button, scoped to this repo.
+        busy = landing_state["bulk_busy"]
+        group = landing_state["group"]
+        for action in _actions_for_group(group if isinstance(group, str) else None):
+            act = menu.addAction(str(action.get("label") or "Action"))
+            act.setEnabled(not busy)
+            act.triggered.connect(
+                lambda _checked=False, a=dict(action), p=path: run_card_action(a, p)
+            )
+        if menu.actions():
+            menu.addSeparator()
         menu.addAction("Open").triggered.connect(
             lambda _checked=False, p=path: open_folder(p)
         )
@@ -1309,14 +1514,25 @@ def build_view(icons, ctx=None) -> QWidget:
             return []
         key = group
         data = _load_group_actions_map()
-        if key not in data or not isinstance(data.get(key), list) or not data.get(key):
+        stored = data.get(key)
+        if not isinstance(stored, list) or not stored:
             if not seed:
                 return []
             seeded = _seed_actions()
             data[key] = seeded
             _save_group_actions_map(data)
             return [dict(item) for item in seeded]
-        return [_normalize_action(item) for item in data[key] if isinstance(item, dict)]
+        items = [_normalize_action(item) for item in stored if isinstance(item, dict)]
+        # Upgrade groups still holding the pre-Branch default set so the new
+        # option appears without the user re-editing their actions.
+        if items and [(a.get("label"), a.get("command")) for a in items] == list(
+            _LEGACY_DEFAULT_ACTIONS
+        ):
+            seeded = _seed_actions()
+            data[key] = seeded
+            _save_group_actions_map(data)
+            return [dict(item) for item in seeded]
+        return items
 
     def _set_actions_for_group(group: str, actions: list[dict]) -> None:
         data = _load_group_actions_map()
@@ -1467,6 +1683,46 @@ def build_view(icons, ctx=None) -> QWidget:
         _set_bulk_enabled(False)
         console_append(f"$ {resolved} — {len(paths)} repos in {group or 'Ungrouped'}")
         set_console_status(f"{label} 0/{len(paths)}…")
+        _run_next_group_action()
+
+    def run_card_action(action: dict, path: str) -> None:
+        """Run one custom action against a single repository (card menu).
+
+        Reuses the sequential bulk queue with a one-item run so the busy lock,
+        card feedback, console lines and the ``N/M ok`` summary behave exactly
+        like the group-wide Actions run — just scoped to one path.
+        """
+        if landing_state["bulk_busy"]:
+            return
+        label = str(action.get("label") or "Action").strip() or "Action"
+        command = str(action.get("command") or "").strip()
+        if not command:
+            console_append(f"  · “{label}” has an empty command", ok=False)
+            return
+        placeholders = _placeholder_names(command)
+        values: dict[str, str] = {}
+        if placeholders:
+            dialog = ActionPlaceholdersDialog(
+                root, action_label=label, placeholders=placeholders
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            values = dialog.values()
+        resolved = _substitute_placeholders(command, values)
+
+        landing_state["bulk_busy"] = True
+        bulk_queue[:] = [path]
+        bulk_meta.update({
+            "op": "card_action",
+            "label": label,
+            "command": resolved,
+            "done": 0,
+            "total": 1,
+            "ok": 0,
+        })
+        _set_bulk_enabled(False)
+        # The per-repo ``$ command — path`` line is logged by the queue runner.
+        set_console_status(f"{label} 0/1…")
         _run_next_group_action()
 
     def _run_next_group_action() -> None:
@@ -1641,11 +1897,14 @@ def build_view(icons, ctx=None) -> QWidget:
             text = _format_remote_status(result)
             ahead = int(result.get("ahead") or 0)
             behind = int(result.get("behind") or 0)
+            # Semantic duotone: amber = your commits ahead, cyan = upstream
+            # commits behind, green = in sync, red = diverged, dim = no remote.
             state = (
-                "err" if ahead and behind
-                else "warn" if (ahead or behind) and result.get("upstream")
-                else "ok" if result.get("upstream") and not ahead and not behind
-                else ""
+                "diverged" if ahead and behind
+                else "ahead" if ahead
+                else "behind" if behind
+                else "ok" if result.get("upstream")
+                else "none"
             )
             label.setText(text)
             label.setProperty("state", state)
@@ -1689,22 +1948,93 @@ def build_view(icons, ctx=None) -> QWidget:
         except RuntimeError:
             pass
 
-    def refresh_card_status(path: str) -> None:
-        """Fetch branch + ahead/behind for one card in the background."""
+    def _update_group_drift_bars() -> None:
+        """Recompute each group row's clean/ahead/behind segments from the cache.
+
+        Debounced (see ``drift_timer``) because status workers complete in a
+        burst; the loop itself is one cheap pass over the favorites.
+        """
+        if favorites_repo is None:
+            return
+        counts: dict[str, list[int]] = {}
+        for favorite in favorites_repo.by_kind("folder"):
+            result = status_cache.get(favorite.ref)
+            if not (result and result.get("is_repo")):
+                continue
+            group = (favorite.group_name or "").strip()
+            ahead = int(result.get("ahead") or 0)
+            behind = int(result.get("behind") or 0)
+            entry = counts.setdefault(group, [0, 0, 0])
+            if ahead and behind:
+                entry[1] += 1  # diverged counts as both — it literally is
+                entry[2] += 1
+            elif ahead:
+                entry[1] += 1
+            elif behind:
+                entry[2] += 1
+            else:
+                entry[0] += 1
+        try:
+            for i in range(groups_list.count()):
+                item = groups_list.item(i)
+                widget = groups_list.itemWidget(item)
+                if widget is None:
+                    continue
+                key = item.data(Qt.ItemDataRole.UserRole)
+                bar = widget.findChild(DriftBar)
+                if bar is None:
+                    continue
+                clean, ahead, behind = counts.get(key or "", [0, 0, 0])
+                bar.set_segments(clean, ahead, behind)
+        except RuntimeError:
+            pass
+
+    def _status_worker_finished() -> None:
+        """One status worker completed — re-enable the Refresh status button
+        once the whole on-demand pass has landed."""
+        if not landing_state.get("status_refreshing"):
+            return
+        pending = max(0, int(landing_state.get("status_pending") or 0) - 1)
+        landing_state["status_pending"] = pending
+        if pending == 0:
+            landing_state["status_refreshing"] = False
+            group = landing_state.get("status_group")
+            if group is not None:
+                # Persist the completed refresh so the timestamp survives a
+                # restart and shows immediately when reopening the group.
+                last_refresh_map[str(group)] = time.time()
+                _save_last_refresh_map()
+                # Only timestamp when the group the pass started for is still
+                # on screen — switching groups mid-pass hides the label.
+                if landing_state.get("group") == group:
+                    _show_last_refresh(group)
+            _set_bulk_enabled(not landing_state["bulk_busy"])
+
+    def refresh_card_status(path: str, *, counts_pending: bool = False) -> None:
+        """Fetch branch + ahead/behind for one card in the background.
+
+        ``counts_pending`` marks workers spawned by the on-demand group
+        refresh so only they drive the pass completion counter (the per-card
+        button and post-fetch refreshes must not).
+        """
         if favorites_repo is None:
             return
         worker = GitWorker("remote_status", path, executable=git_exe())
         status_workers.append(worker)
 
-        def done(result, current=worker) -> None:
+        def done(result, current=worker, counts=counts_pending) -> None:
             if current in status_workers:
                 status_workers.remove(current)
             status_cache[path] = result
             label = _card_remote_pill(path)
             if label is not None:
                 _apply_remote_status(label, result, path)
+            # Status workers complete in a burst — debounce the drift bars.
+            drift_timer.start()
+            if counts:
+                _status_worker_finished()
 
-        def failed(_exc, current=worker) -> None:
+        def failed(_exc, current=worker, counts=counts_pending) -> None:
             if current in status_workers:
                 status_workers.remove(current)
             status_cache[path] = {
@@ -1720,35 +2050,40 @@ def build_view(icons, ctx=None) -> QWidget:
                     label.style().polish(label)
                 except RuntimeError:
                     pass
+            if counts:
+                _status_worker_finished()
 
         worker.signals.finished.connect(done)
         worker.signals.error.connect(failed)
         QThreadPool.globalInstance().start(worker)
 
-    def refresh_all_statuses() -> None:
-        """Kick off a status refresh for every non-demo card on the landing."""
-        try:
-            gen = int(landing_state.get("status_gen") or 0)
-            paths: list[str] = []
-            for i in range(favorites_list.count()):
-                item = favorites_list.item(i)
-                path = item.data(Qt.ItemDataRole.UserRole)
-                widget = favorites_list.itemWidget(item)
-                if widget is None or not path:
-                    continue
-                paths.append(path)
-            # Stagger starts so the UI stays scrollable while pills fill in.
-            for index, path in enumerate(paths):
-                QTimer.singleShot(
-                    index * 12,
-                    lambda p=path, g=gen: (
-                        refresh_card_status(p)
-                        if landing_state.get("status_gen") == g
-                        else None
-                    ),
-                )
-        except RuntimeError:
-            pass
+    def refresh_group_statuses() -> None:
+        """Fetch remote status for every repo in the current group on demand.
+
+        The explicit counterpart to the old automatic refreshes: fills the
+        card pills as results land and recomputes the group drift bars (each
+        completed worker debounces ``_update_group_drift_bars``). Only runs
+        when the user clicks Refresh status — never on load or group select.
+        """
+        if favorites_repo is None or landing_state.get("status_refreshing"):
+            return
+        group = landing_state["group"]
+        if group in (None, "__demo__"):
+            return
+        members = favorites_for_group()
+        paths = [favorite.ref for favorite in members]
+        if not paths:
+            return
+        landing_state["status_refreshing"] = True
+        landing_state["status_pending"] = len(paths)
+        landing_state["status_group"] = group
+        refresh_status.setEnabled(False)
+        set_console_status(f"Refreshing status for {len(paths)} repo{'s' if len(paths) != 1 else ''}…")
+        # Stagger starts so the UI stays responsive while pills fill in.
+        for index, path in enumerate(paths):
+            QTimer.singleShot(
+                index * 12, lambda p=path: refresh_card_status(p, counts_pending=True)
+            )
 
     def pin_folder(path: str, label: str) -> None:
         if favorites_repo is None:
@@ -2107,13 +2442,25 @@ def build_view(icons, ctx=None) -> QWidget:
     persist_timer.setInterval(400)
     persist_timer.timeout.connect(_persist_view_state)
 
-    # Remote status auto-refresh: only while the landing page is on screen.
-    status_timer = QTimer(root)
-    status_timer.setInterval(120_000)
-    status_timer.timeout.connect(
-        lambda: refresh_all_statuses() if landing.isVisible() else None
-    )
-    status_timer.start()
+    # Debounced search filtering — see ``_on_filter_changed``.
+    search_timer = QTimer(root)
+    search_timer.setSingleShot(True)
+    search_timer.setInterval(150)
+    search_timer.timeout.connect(refresh_repo_cards)
+
+    # Debounced recompute of the group drift bars (status workers complete
+    # in bursts; one recompute per burst is plenty).
+    drift_timer = QTimer(root)
+    drift_timer.setSingleShot(True)
+    drift_timer.setInterval(250)
+    drift_timer.timeout.connect(_update_group_drift_bars)
+
+    # The relative deck timestamp re-renders on the 120 s boundary — purely a
+    # text refresh, never a git fetch (status is fetched only on demand).
+    stamp_timer = QTimer(root)
+    stamp_timer.setInterval(120_000)
+    stamp_timer.timeout.connect(lambda: _show_last_refresh(landing_state["group"]))
+    stamp_timer.start()
 
     # ---------------------------------------------------------------- wiring
     def choose_folder() -> None:
@@ -2137,8 +2484,11 @@ def build_view(icons, ctx=None) -> QWidget:
             refresh_favorites()
 
     def _on_filter_changed() -> None:
-        refresh_repo_cards()
-        persist_timer.start()  # debounce while typing in the search field
+        # Debounce the rebuild — typing in the search field must not rebuild
+        # every card per keystroke (lazy chunks make each rebuild cheap, but
+        # settling the filter after a short pause is smoother still).
+        search_timer.start()
+        persist_timer.start()  # debounce the persisted search text
 
     open_button.clicked.connect(choose_folder)
     scan_button.clicked.connect(scan_for_repos)
@@ -2147,11 +2497,16 @@ def build_view(icons, ctx=None) -> QWidget:
     manage_button.clicked.connect(manage_groups)
     refresh_button.clicked.connect(refresh_favorites)
     favorites_list.customContextMenuRequested.connect(show_card_menu)
+    # Lazy pagination: scrolling near the bottom materializes the next chunk.
+    favorites_list.verticalScrollBar().valueChanged.connect(
+        lambda _value: _maybe_load_more()
+    )
     # Group rows are QPushButtons that call open_group directly — do not hook
     # currentItemChanged (it re-enters clear_list_widget and can segfault).
     bulk_fetch.clicked.connect(lambda: run_bulk("fetch"))
     bulk_status.clicked.connect(lambda: run_bulk("status"))
     bulk_reset.clicked.connect(lambda: run_bulk("reset"))
+    refresh_status.clicked.connect(refresh_group_statuses)
     branch_fetch.clicked.connect(run_branch_fetch)
     branch_edit.clicked.connect(_edit_branches_dialog)
     branch_combo.currentTextChanged.connect(lambda _text: persist_timer.start())
@@ -2162,9 +2517,14 @@ def build_view(icons, ctx=None) -> QWidget:
 
     _refresh_branch_combo()
     _restore_view_state()
+    # Load persisted per-group last-refresh times before the first render so
+    # the deck timestamp for the restored group shows immediately.
+    if not last_refresh_loaded:
+        last_refresh_map.update(_load_last_refresh_map())
+        last_refresh_loaded = True
     refresh_favorites()
-    # Defer status workers until after the landing widgets are fully built.
-    QTimer.singleShot(0, refresh_all_statuses)
+    # Deliberately no git work on load: very large groups must not touch the
+    # remote until the user asks (Status all, per-card refresh, fetch, …).
     return root
 
 

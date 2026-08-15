@@ -39,9 +39,11 @@ def _bubble(kind: str, text: str) -> QFrame:
     frame.setMaximumWidth(_MAX_BUBBLE)
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(12, 9, 12, 9)
-    label = QLabel(text)
-    label.setWordWrap(True)
+    label = QLabel()
+    # Flags before text — see styled_label: avoids the expensive re-layout.
     label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    label.setWordWrap(True)
+    label.setText(text)
     layout.addWidget(label)
     return frame
 

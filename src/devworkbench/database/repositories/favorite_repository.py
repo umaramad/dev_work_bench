@@ -11,8 +11,14 @@ class FavoriteRepository(CrudRepository[Favorite]):
 
     model = Favorite
 
-    def by_kind(self, kind: str, limit: int | None = 100) -> list[Favorite]:
-        """Favorites of one kind, newest first (``limit=None`` returns all)."""
+    def by_kind(self, kind: str, limit: int | None = None) -> list[Favorite]:
+        """Favorites of one kind, newest first (returns all by default).
+
+        An explicit ``limit`` caps the newest rows; callers that need only a
+        bounded slice should pass it deliberately — a hidden default cap used
+        to silently drop favorites past 100 (broken groups, half-rendered
+        landing lists), so "all" is the safe default.
+        """
         if limit is None:
             rows = self._fetch_all(
                 "SELECT * FROM favorites WHERE kind = ? ORDER BY id DESC",

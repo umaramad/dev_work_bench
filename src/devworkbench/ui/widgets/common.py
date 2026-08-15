@@ -35,9 +35,13 @@ def title_label(text: str, parent: QWidget | None = None) -> QLabel:
 
 
 def styled_label(text: str, kind: str = "muted", parent: QWidget | None = None) -> QLabel:
-    label = QLabel(text, parent)
+    label = QLabel(parent)
     label.setObjectName(kind)
+    # Set the interaction flags BEFORE the text: on a QLabel with content this
+    # forces a full re-layout (~0.8 ms/label — the #1 cost in the Git landing
+    # build), but on an empty label it is a no-op (~0.01 ms).
     label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    label.setText(text)
     return label
 
 
