@@ -47,7 +47,7 @@ logger = logging.getLogger("devworkbench.bootstrap")
 
 DEFAULT_CONFIG: dict = {
     "appearance": {"theme": "dark", "font_size": 13},
-    "startup": {"restore_workspace": True, "module": "compare"},
+    "startup": {"restore_workspace": True, "module": "home"},
     "updates": {"check": True, "channel": "stable"},
     "database": {"path": None},  # None -> default location from Paths
 }

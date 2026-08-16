@@ -505,7 +505,6 @@ class AppearancePage(SettingsPage):
         panels_layout.setSpacing(8)
         for label, action_key, icon_key in (
             ("Command Palette", "open_palette", "search"),
-            ("Navigator", "toggle_navigator", "eye"),
             ("Output", "toggle_output", "terminal"),
             ("Details", "toggle_details", "info"),
             ("Toggle Theme", "toggle_theme", "moon"),

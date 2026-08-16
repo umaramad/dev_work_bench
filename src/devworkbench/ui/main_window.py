@@ -3,15 +3,15 @@
 Layout
     menubar (top)
     ├─ Sidebar dock     (left, pinned)    — module rail (Compare / Git / …)
-    ├─ Navigator dock   (left, floatable) — contextual tree
-    ├─ Output dock      (bottom)          — Terminal / Command Log / Tasks
+    ├─ Navigator dock   (left, hidden)    — optional contextual tree
+    ├─ Output dock      (bottom, hidden)  — Terminal / Command Log / Tasks
     ├─ Details dock     (right, hidden)   — inspector
     └─ workspace        (center)          — module stack (tab bar hidden)
 
 Shell chrome formerly on the top toolbar (theme, docks, command palette)
 lives under Settings → Appearance → Workspace.
 
-All panel visibility is toggleable from the View menu / command palette.
+Output / Details remain toggleable from the View menu / command palette.
 """
 
 from __future__ import annotations
@@ -110,12 +110,19 @@ class MainWindow(QMainWindow):
         # queued line/progress events touch destroyed Output dock widgets.
         QApplication.instance().aboutToQuit.connect(self._shutdown_run_worker)
 
-        # Apply the persisted menu-manager state, then build the initial
-        # screen. _on_module_changed(0) is called directly because index 0 is
-        # already current (setCurrentIndex(0) would not emit currentChanged);
-        # if module 0 is disabled the handler hops to the first visible one.
+        # Apply the persisted menu-manager state, then open the configured
+        # startup module (default: Home). Fall back to the first visible tab.
         self._apply_ui_visibility()
-        self._on_module_changed(0)
+        startup = "home"
+        if self._config is not None:
+            try:
+                startup = str(self._config.get("startup.module") or "home")
+            except Exception:  # noqa: BLE001
+                startup = "home"
+        if self._module_visible(startup) and startup in self._module_by_id:
+            self._activate_module_id(startup)
+        else:
+            self._on_module_changed(0)
 
     # ------------------------------------------------------------------ shell
 
@@ -137,6 +144,9 @@ class MainWindow(QMainWindow):
         dock.setObjectName("navigatorDock")
         dock.setWidget(self.navigator)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        # Hidden by default — module switching is the sidebar; open via View menu
+        # if needed. Leaving it visible stacks a second left panel under the rail.
+        dock.hide()
         self._navigator_dock = dock
 
     def _build_output(self) -> None:
@@ -147,7 +157,7 @@ class MainWindow(QMainWindow):
         dock.setMinimumHeight(150)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         # Console / command log / tasks stay minimized by default — the user
-        # opens the Output panel on demand (View → Output / toolbar / palette).
+        # opens the Output panel on demand (View → Output / Settings / palette).
         dock.hide()
         self._output_dock = dock
 
@@ -240,7 +250,6 @@ class MainWindow(QMainWindow):
             action.setData(icon)
         view_menu = self.menuBar().addMenu("&View")
         self._menus["view"] = view_menu
-        view_menu.addAction(self._dock_actions["nav"])
         view_menu.addAction(self._dock_actions["out"])
         view_menu.addAction(self._dock_actions["det"])
         view_menu.addSeparator()
@@ -315,7 +324,6 @@ class MainWindow(QMainWindow):
         for module in self._modules:
             if self._module_visible(module.id):
                 commands.append((f"Switch to {module.title}", module.icon, partial(self._activate_module_id, module.id)))
-        commands.append(("Toggle Navigator", "eye", self._dock_actions["nav"].trigger))
         commands.append(("Toggle Output", "terminal", self._dock_actions["out"].trigger))
         commands.append(("Toggle Details", "info", self._dock_actions["det"].trigger))
         commands.append(("Toggle Dark / Light Theme", "moon", self._toggle_theme))
@@ -367,7 +375,12 @@ class MainWindow(QMainWindow):
                     view = self._view_for(index)
                     if hasattr(view, "set_return_module"):
                         view.set_return_module(current_module.id)
-                self.workspace.setCurrentIndex(index)
+                # setCurrentIndex is a no-op when already on ``index`` (e.g. Home
+                # at 0 on first launch) — force the change handler so the view builds.
+                if self.workspace.currentIndex() == index:
+                    self._on_module_changed(index)
+                else:
+                    self.workspace.setCurrentIndex(index)
                 return
 
     def _on_sidebar_collapsed(self, collapsed: bool) -> None:
@@ -434,7 +447,7 @@ class MainWindow(QMainWindow):
         self.status_bar.set_message(f"Settings saved ({len(keys or [])} changes)")
 
     def _on_navigation_request(self, module_id: str = None) -> None:
-        self._activate_module_id(module_id or "compare")
+        self._activate_module_id(module_id or "home")
 
     # ----------------------------------------------------------- menu manager
 
@@ -445,7 +458,7 @@ class MainWindow(QMainWindow):
         never re-enable the rest. With no configuration service (tests,
         headless) everything is visible.
         """
-        if module_id == "settings":
+        if module_id in ("settings", "home"):
             return True
         if self._config is None:
             return True

@@ -53,35 +53,35 @@ DARK: dict[str, str] = {
 LIGHT: dict[str, str] = {
     "bg": "#f2f3f6",
     "surface": "#ffffff",
-    "surface2": "#eceef3",
-    "raise": "#e3e6ee",
-    "border": "#dfe2ea",
-    "border2": "#c9cede",
-    "text": "#232833",
-    "text2": "#5c6577",
-    "text3": "#9aa2b4",
+    "surface2": "#e8eaef",
+    "raise": "#dce0e8",
+    "border": "#b8bfcc",
+    "border2": "#8f99ab",
+    "text": "#1a1f2a",
+    "text2": "#3d4556",
+    "text3": "#5c6577",
     "accent": "#2f6fdd",
     "accentHover": "#1f63d6",
     "accentPress": "#2459b4",
-    "accentSoft": "rgba(47, 111, 221, 0.14)",
+    "accentSoft": "rgba(47, 111, 221, 0.16)",
     "accentText": "#ffffff",
-    "green": "#2c9d68",
-    "red": "#d05050",
-    "redSoft": "rgba(208, 80, 80, 0.11)",
-    "redBorder": "rgba(208, 80, 80, 0.5)",
-    "amber": "#c08a2d",
-    "cyan": "#1f9bb0",
-    "purple": "#8a5fd0",
+    "green": "#248a5a",
+    "red": "#c44545",
+    "redSoft": "rgba(196, 69, 69, 0.12)",
+    "redBorder": "rgba(196, 69, 69, 0.55)",
+    "amber": "#a87420",
+    "cyan": "#1a8799",
+    "purple": "#7a52c0",
     "selection": "rgba(47, 111, 221, 0.28)",
-    "scroll": "#c2c8d6",
-    "scrollHover": "#a9b0c2",
+    "scroll": "#a9b0c2",
+    "scrollHover": "#8f99ab",
     "inputBg": "#ffffff",
     "toolbarBg": "#f7f8fa",
     "menuBg": "#ffffff",
     "tabBarBg": "#f7f8fa",
     "panel": "#ffffff",
     "chatUser": "#2f6fdd",
-    "rowHover": "#eceef3",
+    "rowHover": "#e8eaef",
 }
 
 THEMES: dict[str, dict[str, str]] = {"dark": DARK, "light": LIGHT}
@@ -294,9 +294,10 @@ QLabel#errorBannerDetail { color: __text2; font-size: 12px; }
    Two-column IconMode cards: avatar + branch top-right, action chips,
    sync footer. Theme tokens only (no separate dashboard palette).
    Semantic status: amber = ahead, cyan = behind, green = clean, red = diverged. */
-QListWidget#groupList, QListWidget#favoritesList {
+QScrollArea#favoritesList, QListWidget#groupList {
     background: transparent; border: none; border-radius: 0; }
-QListWidget#groupList::item, QListWidget#favoritesList::item { padding: 0; }
+QListWidget#groupList::item { padding: 0; }
+QWidget#favoritesHost { background: transparent; }
 QLabel#groupsHeading { color: __text3; font-weight: 700; letter-spacing: 1.5px; }
 QLabel#groupTitle { color: __text; font-weight: 700;
     font-family: "SF Mono", Menlo, monospace; }
@@ -354,6 +355,30 @@ QPushButton#consoleToggle { font-family: "SF Mono", Menlo, monospace;
     color: __text2; }
 QLabel#consoleStatus { font-family: "SF Mono", Menlo, monospace;
     color: __text3; }
+
+/* ---------- home landing ---------- */
+QWidget#homePage { background: transparent; }
+QLabel#homeBrand { color: __text; letter-spacing: -0.5px; }
+QLabel#homeTagline { color: __text2; font-size: 14px; }
+QLabel#homeSectionTitle { color: __text; font-size: 15px; font-weight: 700; }
+QFrame#homeChip {
+    background: __surface; border: 1px solid __border2; border-radius: 12px;
+    min-width: 110px; }
+QLabel#homeChipLabel {
+    color: __text3; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; }
+QLabel#homeChipValue {
+    color: __text; font-size: 20px; font-weight: 700;
+    font-family: "SF Mono", Menlo, monospace; }
+QPushButton#homeLink {
+    text-align: left; padding: 8px 12px; border-radius: 8px;
+    background: __surface; border: 1px solid __border; color: __text; }
+QPushButton#homeLink:hover {
+    background: __surface2; border-color: __border2; }
+QPushButton#homeTile {
+    background: __surface; border: 1px solid __border; border-radius: 12px; }
+QPushButton#homeTile:hover {
+    background: __surface2; border-color: __accent; }
+QLabel#homeTileTitle { font-weight: 600; color: __text; }
 """
 
 

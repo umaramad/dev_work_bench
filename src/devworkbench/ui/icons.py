@@ -601,6 +601,23 @@ def _glyph_download(p: QPainter, s: int, c: QColor) -> None:
     p.drawLine(QPointF(s * 0.28, s * 0.84), QPointF(s * 0.72, s * 0.84))
 
 
+def _glyph_home(p: QPainter, s: int, c: QColor) -> None:
+    # Simple house: roof triangle + body rectangle + door notch
+    pen = _pen(c, 1.4)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    peak = QPointF(s * 0.50, s * 0.18)
+    left = QPointF(s * 0.16, s * 0.46)
+    right = QPointF(s * 0.84, s * 0.46)
+    p.drawLine(peak, left)
+    p.drawLine(peak, right)
+    p.drawLine(left, right)
+    body = QRectF(s * 0.24, s * 0.46, s * 0.52, s * 0.36)
+    p.drawRect(body)
+    door = QRectF(s * 0.42, s * 0.58, s * 0.16, s * 0.24)
+    p.drawRect(door)
+
+
 def _glyph_network(p: QPainter, s: int, c: QColor) -> None:
     # server: two stacked boxes
     p.setPen(_pen(c, 1.4))
@@ -616,6 +633,7 @@ def _glyph_network(p: QPainter, s: int, c: QColor) -> None:
 
 _GLYPHS: dict[str, object] = {
     "app": _glyph_app,
+    "home": _glyph_home,
     "compare": _glyph_compare,
     "git": _glyph_git,
     "ai": _glyph_ai,

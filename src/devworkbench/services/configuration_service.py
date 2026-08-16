@@ -29,6 +29,7 @@ logger = logging.getLogger("devworkbench.services.configuration")
 TOPIC_SETTINGS_CHANGED = "settings.changed"      # payload: key, value
 TOPIC_SETTINGS_APPLIED = "settings.applied"      # payload: keys (list)
 TOPIC_NAVIGATION_REQUEST = "navigation.request"  # payload: module_id
+TOPIC_GIT_OPEN_GROUP = "git.open_group"          # payload: group (str)
 
 # -- schema -----------------------------------------------------------------
 
@@ -120,8 +121,8 @@ SCHEMA: list[SettingDef] = [
     # ---------------------------------------------------------------- General
     *_defs(
         "General",
-        dict(key="startup.module", label="Startup module", kind=SettingKind.ENUM, default="compare",
-             choices=("compare", "git", "ai", "ssh", "loganalyzer", "settings", "plugins"),
+        dict(key="startup.module", label="Startup module", kind=SettingKind.ENUM, default="home",
+             choices=("home", "compare", "git", "ai", "ssh", "loganalyzer", "settings", "plugins"),
              hint="Module shown when DevWorkbench launches"),
         dict(key="startup.restore_workspace", label="Restore last workspace on launch", kind=SettingKind.BOOL, default=True),
         dict(key="startup.confirm_quit", label="Confirm before quitting", kind=SettingKind.BOOL, default=True),
@@ -508,7 +509,29 @@ class ConfigurationService:
                 logger.exception("failed to load setting %r", definition.key)
                 continue
             self._settings.set(definition.key, self._coerce(stored, definition))
+        self._migrate_startup_home_default()
         logger.info("loaded %d settings from %s", len(SCHEMA), getattr(self._repository, "_manager", "memory"))
+
+    def _migrate_startup_home_default(self) -> None:
+        """One-shot: previous factory default was Compare — switch to Home.
+
+        Users who never changed Startup still have ``compare`` stored in SQLite.
+        Leave intentional choices (git, settings, …) alone; only migrate the
+        old default value, once.
+        """
+        if self._repository is None:
+            return
+        try:
+            if self._repository.get("startup.migrated_to_home", False):
+                return
+            current = str(self._settings.get("startup.module", "home") or "home")
+            if current == "compare":
+                definition = BY_KEY.get("startup.module")
+                if definition is not None:
+                    self._persist(definition, "home")
+            self._repository.set("startup.migrated_to_home", True)
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to migrate startup.module to home")
 
     # -- internals ---------------------------------------------------------------
 

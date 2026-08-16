@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -59,6 +60,7 @@ from devworkbench.modules.git.dialog import (
     ScanReposDialog,
 )
 from devworkbench.modules.git.maven_deps import build_maven_deps_pane
+from devworkbench.services.configuration_service import TOPIC_GIT_OPEN_GROUP
 from devworkbench.ui.samples import GIT_REPOS
 from devworkbench.ui.theme import current_colors
 from devworkbench.ui.widgets.common import button, clear_list_widget, icon_button, search_field, styled_label
@@ -66,9 +68,8 @@ from devworkbench.workers.git_worker import GitWorker
 
 logger = logging.getLogger("devworkbench.modules.git")
 
-# Fixed card size keeps the grid scroll smooth while status / toasts update
-# (no per-update sizeHint thrashing). Width is recomputed on viewport resize
-# for a 1–2 column IconMode grid.
+# Fixed card height keeps the grid scroll smooth while status / toasts update.
+# Width is shared evenly across 1–2 QGridLayout columns (not IconMode).
 _CARD_HEIGHT = 186
 _CARD_MIN_WIDTH = 280
 # Cards materialized per batch on the landing. The full filtered member list
@@ -173,6 +174,7 @@ def build_view(icons, ctx=None) -> QWidget:
     service = ctx.resolve("services.configuration") if ctx is not None and ctx.has("services.configuration") else None
     favorites_repo = ctx.resolve("database.repositories.favorites") if ctx is not None and ctx.has("database.repositories.favorites") else None
     history_repo = ctx.resolve("database.repositories.history") if ctx is not None and ctx.has("database.repositories.history") else None
+    events = ctx.resolve("core.events") if ctx is not None and ctx.has("core.events") else None
     colors = current_colors()
 
     def git_exe() -> str:
@@ -372,20 +374,24 @@ def build_view(icons, ctx=None) -> QWidget:
     command_deck_layout.addWidget(bulk_bar)
     repos_pane_layout.addWidget(command_deck)
 
-    favorites_list = QListWidget()
-    favorites_list.setObjectName("favoritesList")
-    favorites_list.setFrameStyle(0)
-    favorites_list.setSpacing(10)
-    favorites_list.setUniformItemSizes(True)
-    favorites_list.setViewMode(QListWidget.ViewMode.IconMode)
-    favorites_list.setMovement(QListWidget.Movement.Static)
-    favorites_list.setResizeMode(QListWidget.ResizeMode.Adjust)
-    favorites_list.setWrapping(True)
-    favorites_list.setWordWrap(False)
-    favorites_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-    favorites_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    favorites_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-    repos_pane_layout.addWidget(favorites_list, 1)
+    favorites_scroll = QScrollArea()
+    favorites_scroll.setObjectName("favoritesList")
+    favorites_scroll.setWidgetResizable(True)
+    favorites_scroll.setFrameStyle(0)
+    favorites_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    favorites_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    favorites_scroll.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    favorites_host = QWidget()
+    favorites_host.setObjectName("favoritesHost")
+    favorites_grid = QGridLayout(favorites_host)
+    favorites_grid.setContentsMargins(4, 4, 4, 4)
+    favorites_grid.setHorizontalSpacing(12)
+    favorites_grid.setVerticalSpacing(12)
+    favorites_grid.setAlignment(
+        Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+    )
+    favorites_scroll.setWidget(favorites_host)
+    repos_pane_layout.addWidget(favorites_scroll, 1)
 
     empty_state = styled_label(
         "Select a group on the left to see its repositories.",
@@ -477,41 +483,48 @@ def build_view(icons, ctx=None) -> QWidget:
     bulk_workers: list = []
     bulk_queue: list = []  # remaining paths for the active bulk run
     bulk_meta = {"op": "", "done": 0, "total": 0, "ok": 0}
+    # Ordered paths + widgets for the QGridLayout card grid (avoids IconMode overlap).
+    card_order: list[str] = []
+    card_by_path: dict[str, QWidget] = {}
 
-    def _card_grid_size() -> QSize:
-        """Card size hint for the IconMode grid (1 col narrow, 2 cols wide)."""
-        viewport = favorites_list.viewport()
-        width = max(1, viewport.width() if viewport is not None else favorites_list.width())
-        spacing = max(0, favorites_list.spacing())
-        cols = 2 if width >= (_CARD_MIN_WIDTH * 2 + spacing * 3) else 1
-        usable = max(_CARD_MIN_WIDTH, width - spacing * (cols + 1))
-        card_w = max(_CARD_MIN_WIDTH, usable // cols)
-        return QSize(card_w, _CARD_HEIGHT)
+    def _grid_column_count() -> int:
+        width = max(1, favorites_scroll.viewport().width())
+        gap = max(0, favorites_grid.horizontalSpacing())
+        return 2 if width >= (_CARD_MIN_WIDTH * 2 + gap * 3) else 1
 
-    def _sync_card_size_hints() -> None:
-        """Recompute every item sizeHint after the favorites viewport resizes."""
-        if favorites_list.count() == 0:
-            return
-        hint = _card_grid_size()
-        inner = QSize(max(1, hint.width() - 8), max(1, hint.height() - 8))
-        for index in range(favorites_list.count()):
-            item = favorites_list.item(index)
-            if item is None:
+    def _relayout_card_grid() -> None:
+        """Place cards into 1–2 equal columns without overlapping."""
+        cols = _grid_column_count()
+        widgets = [card_by_path[p] for p in card_order if p in card_by_path]
+        while favorites_grid.count():
+            favorites_grid.takeAt(0)
+        for index, widget in enumerate(widgets):
+            favorites_grid.addWidget(widget, index // cols, index % cols)
+        favorites_grid.setColumnStretch(0, 1)
+        favorites_grid.setColumnStretch(1, 1 if cols > 1 else 0)
+
+    def _clear_cards() -> None:
+        """Destroy every repo card (equivalent of clear_list_widget for the grid)."""
+        for path in list(card_order):
+            widget = card_by_path.pop(path, None)
+            if widget is None:
                 continue
-            if item.sizeHint() != hint:
-                item.setSizeHint(hint)
-            widget = favorites_list.itemWidget(item)
-            if widget is not None and widget.size() != inner:
-                widget.setFixedSize(inner)
+            favorites_grid.removeWidget(widget)
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
+        card_order.clear()
+        while favorites_grid.count():
+            favorites_grid.takeAt(0)
 
     class _FavoritesResizeFilter(QObject):
         def eventFilter(self, obj, event):  # noqa: N802
             if event.type() == QEvent.Type.Resize:
-                QTimer.singleShot(0, _sync_card_size_hints)
+                QTimer.singleShot(0, _relayout_card_grid)
             return False
 
-    _favorites_resize_filter = _FavoritesResizeFilter(favorites_list)
-    favorites_list.viewport().installEventFilter(_favorites_resize_filter)
+    _favorites_resize_filter = _FavoritesResizeFilter(favorites_scroll)
+    favorites_scroll.viewport().installEventFilter(_favorites_resize_filter)
 
     def _repolish(widget) -> None:
         style = widget.style()
@@ -523,6 +536,8 @@ def build_view(icons, ctx=None) -> QWidget:
         display = label or os.path.basename(path.rstrip("/")) or path
         card = QWidget()
         card.setObjectName("repoCard")
+        card.setProperty("repoPath", path)
+        card.setMinimumHeight(_CARD_HEIGHT)
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         root = QVBoxLayout(card)
         root.setContentsMargins(14, 14, 14, 12)
@@ -659,16 +674,14 @@ def build_view(icons, ctx=None) -> QWidget:
         return card
 
     def add_card(path: str, label: str, demo: bool) -> None:
-        item = QListWidgetItem()
-        item.setData(Qt.ItemDataRole.UserRole, path)
         widget = card_widget(path, label, demo)
-        hint = _card_grid_size()
-        item.setSizeHint(hint)
-        # The item must be in the list *before* setItemWidget — otherwise the
-        # widget is never attached to the view and the card never renders.
-        favorites_list.addItem(item)
-        favorites_list.setItemWidget(item, widget)
-        widget.setFixedSize(max(1, hint.width() - 8), max(1, hint.height() - 8))
+        card_order.append(path)
+        card_by_path[path] = widget
+        cols = _grid_column_count()
+        index = len(card_order) - 1
+        favorites_grid.addWidget(widget, index // cols, index % cols)
+        favorites_grid.setColumnStretch(0, 1)
+        favorites_grid.setColumnStretch(1, 1 if cols > 1 else 0)
 
     def add_group_row(key: str, name: str, count: int) -> None:
         """One selectable row in the left group list (name + repo count)."""
@@ -795,16 +808,12 @@ def build_view(icons, ctx=None) -> QWidget:
 
     def _card_updated_label(path: str):
         try:
-            for i in range(favorites_list.count()):
-                item = favorites_list.item(i)
-                if item.data(Qt.ItemDataRole.UserRole) != path:
-                    continue
-                widget = favorites_list.itemWidget(item)
-                if widget is None:
-                    return None
-                for label in widget.findChildren(QLabel):
-                    if label.property("role") == "cardUpdated":
-                        return label
+            widget = card_by_path.get(path)
+            if widget is None:
+                return None
+            for label in widget.findChildren(QLabel):
+                if label.property("role") == "cardUpdated":
+                    return label
         except RuntimeError:
             return None
         return None
@@ -821,11 +830,7 @@ def build_view(icons, ctx=None) -> QWidget:
     def _render_card_updated_labels() -> None:
         """Refresh every visible card's bottom-right updated stamp."""
         try:
-            for i in range(favorites_list.count()):
-                item = favorites_list.item(i)
-                path = item.data(Qt.ItemDataRole.UserRole)
-                if not path:
-                    continue
+            for path in card_order:
                 _apply_card_updated(path)
         except RuntimeError:
             pass
@@ -931,10 +936,10 @@ def build_view(icons, ctx=None) -> QWidget:
         if landing_state.get("refreshing"):
             return
         landing_state["refreshing"] = True
-        favorites_list.setUpdatesEnabled(False)
+        favorites_host.setUpdatesEnabled(False)
         try:
             group = landing_state["group"]
-            clear_list_widget(favorites_list)
+            _clear_cards()
             landing_state["chunk"] = 0
             landing_state["members"] = []
             # Show the last-refresh timestamp for this group (persisted per
@@ -982,8 +987,9 @@ def build_view(icons, ctx=None) -> QWidget:
             _set_bulk_enabled(not landing_state["bulk_busy"])
             _update_group_drift_bars()
         finally:
-            favorites_list.setUpdatesEnabled(True)
+            favorites_host.setUpdatesEnabled(True)
             landing_state["refreshing"] = False
+            QTimer.singleShot(0, _relayout_card_grid)
 
     def _render_next_chunk() -> None:
         """Materialize the next batch of repo cards (lazy pagination)."""
@@ -1009,7 +1015,7 @@ def build_view(icons, ctx=None) -> QWidget:
         group = landing_state["group"]
         if group in (None, "__demo__") or favorites_repo is None:
             return
-        scrollbar = favorites_list.verticalScrollBar()
+        scrollbar = favorites_scroll.verticalScrollBar()
         if scrollbar.maximum() - scrollbar.value() <= 60:
             QTimer.singleShot(0, _render_next_chunk)
 
@@ -1025,7 +1031,7 @@ def build_view(icons, ctx=None) -> QWidget:
         """Select a group and refresh the right-hand repo list in place."""
         if key is None or landing_state.get("refreshing"):
             return
-        if key == landing_state["group"] and favorites_list.count() > 0:
+        if key == landing_state["group"] and card_order:
             # Already showing this group — still sync the checked row state.
             _sync_group_checked(key)
             return
@@ -1112,13 +1118,17 @@ def build_view(icons, ctx=None) -> QWidget:
         the card's buttons, so the behavior is identical while staying testable
         (no modal ``exec`` loop).
         """
-        item = favorites_list.itemAt(position)
-        if item is None or not item.flags():  # group headers are plain labels
+        host_pos = favorites_host.mapFrom(favorites_scroll.viewport(), position)
+        child = favorites_host.childAt(host_pos)
+        card = child
+        while card is not None and card.objectName() != "repoCard":
+            card = card.parentWidget()
+        if card is None:
             return
-        path = item.data(Qt.ItemDataRole.UserRole)
+        path = card.property("repoPath")
         if not path:
             return
-        menu = QMenu(favorites_list)
+        menu = QMenu(favorites_scroll)
         # Same custom actions as the top Actions button, scoped to this repo.
         busy = landing_state["bulk_busy"]
         group = landing_state["group"]
@@ -1128,6 +1138,17 @@ def build_view(icons, ctx=None) -> QWidget:
             act.triggered.connect(
                 lambda _checked=False, a=dict(action), p=path: run_card_action(a, p)
             )
+        # Same Packs as Actions ▾ — scoped to this repository only.
+        packs = menu.addMenu("Packs")
+        packs.setEnabled(not busy)
+        pack_act = packs.addAction("Add → Commit → Push")
+        pack_act.setToolTip(
+            "git add . · commit with one message · git push — this repository only"
+        )
+        pack_act.setEnabled(not busy)
+        pack_act.triggered.connect(
+            lambda _checked=False, p=path: run_card_pack_add_commit_push(p)
+        )
         if menu.actions():
             menu.addSeparator()
         menu.addAction("Open").triggered.connect(
@@ -1151,7 +1172,7 @@ def build_view(icons, ctx=None) -> QWidget:
             menu.addAction("Remove from favorites").triggered.connect(
                 lambda _checked=False, p=path: remove_favorite(p)
             )
-        menu.popup(favorites_list.mapToGlobal(position))
+        menu.popup(favorites_scroll.viewport().mapToGlobal(position))
 
     def open_in_vscode(path: str) -> None:
         """Open the repository folder in Visual Studio Code (``code`` CLI or .app)."""
@@ -1333,20 +1354,16 @@ def build_view(icons, ctx=None) -> QWidget:
     def _set_card_op_status(path: str, text: str, ok: bool | None = None) -> None:
         """Update the per-card toast line if the card is still on screen."""
         try:
-            for i in range(favorites_list.count()):
-                item = favorites_list.item(i)
-                if item.data(Qt.ItemDataRole.UserRole) != path:
-                    continue
-                widget = favorites_list.itemWidget(item)
-                if widget is None:
+            widget = card_by_path.get(path)
+            if widget is None:
+                return
+            for label in widget.findChildren(QLabel):
+                if label.property("role") == "cardStatus":
+                    if ok is None:
+                        label.setText(text)
+                    else:
+                        _show_card_toast(label, text, ok=ok, path=path)
                     return
-                for label in widget.findChildren(QLabel):
-                    if label.property("role") == "cardStatus":
-                        if ok is None:
-                            label.setText(text)
-                        else:
-                            _show_card_toast(label, text, ok=ok, path=path)
-                        return
         except RuntimeError:
             pass
 
@@ -1852,6 +1869,25 @@ def build_view(icons, ctx=None) -> QWidget:
         if not members:
             console_append("  · no repositories in this group", ok=False)
             return
+        _start_pack_add_commit_push(
+            [favorite.ref for favorite in members],
+            scope=f"{len(members)} repos in {group or 'Ungrouped'}",
+        )
+
+    def run_card_pack_add_commit_push(path: str) -> None:
+        """Same Add→Commit→Push pack as the group menu, scoped to one repo card."""
+        if landing_state["bulk_busy"]:
+            return
+        if not path or not os.path.isdir(path):
+            console_append(f"  · path not found: {path}", ok=False)
+            return
+        name = os.path.basename(path.rstrip("/")) or path
+        _start_pack_add_commit_push([path], scope=name)
+
+    def _start_pack_add_commit_push(paths: list[str], *, scope: str) -> None:
+        """Prompt for commit message, then run add → commit → push on ``paths``."""
+        if not paths:
+            return
         dialog = ActionPlaceholdersDialog(
             root, action_label="Add → Commit → Push", placeholders=["message"]
         )
@@ -1867,7 +1903,6 @@ def build_view(icons, ctx=None) -> QWidget:
             f'git commit -m "{safe_msg}"',
             "git push",
         ]
-        paths = [favorite.ref for favorite in members]
         landing_state["bulk_busy"] = True
         bulk_queue[:] = list(paths)
         bulk_meta.update({
@@ -1881,9 +1916,7 @@ def build_view(icons, ctx=None) -> QWidget:
             "ok": 0,
         })
         _set_bulk_enabled(False)
-        console_append(
-            f"$ pack Add→Commit→Push — {len(paths)} repos in {group or 'Ungrouped'}"
-        )
+        console_append(f"$ pack Add→Commit→Push — {scope}")
         set_console_status(f"pack 0/{len(paths)}…")
         _run_next_group_action()
 
@@ -2275,18 +2308,14 @@ def build_view(icons, ctx=None) -> QWidget:
             pass  # the card was rebuilt while the worker ran
 
     def _card_remote_pill(path: str):
-        """The branch/sync pill of the live card for ``path`` (None if gone)."""
+        """The sync-status label of the live card for ``path`` (None if gone)."""
         try:
-            for i in range(favorites_list.count()):
-                item = favorites_list.item(i)
-                if item.data(Qt.ItemDataRole.UserRole) != path:
-                    continue
-                widget = favorites_list.itemWidget(item)
-                if widget is None:
-                    return None
-                for label in widget.findChildren(QLabel):
-                    if label.property("role") == "cardRemoteStatus":
-                        return label
+            widget = card_by_path.get(path)
+            if widget is None:
+                return None
+            for label in widget.findChildren(QLabel):
+                if label.property("role") == "cardRemoteStatus":
+                    return label
         except RuntimeError:
             return None
         return None
@@ -2294,11 +2323,7 @@ def build_view(icons, ctx=None) -> QWidget:
     def _render_card_statuses() -> None:
         """Push cached statuses onto the current cards (after a rebuild)."""
         try:
-            for i in range(favorites_list.count()):
-                item = favorites_list.item(i)
-                path = item.data(Qt.ItemDataRole.UserRole)
-                if not path:
-                    continue
+            for path in card_order:
                 result = status_cache.get(path)
                 if result is not None:
                     label = _card_remote_pill(path)
@@ -2879,9 +2904,9 @@ def build_view(icons, ctx=None) -> QWidget:
     search_edit.textChanged.connect(lambda _text: _on_filter_changed())
     manage_button.clicked.connect(manage_groups)
     refresh_button.clicked.connect(refresh_favorites)
-    favorites_list.customContextMenuRequested.connect(show_card_menu)
+    favorites_scroll.customContextMenuRequested.connect(show_card_menu)
     # Lazy pagination: scrolling near the bottom materializes the next chunk.
-    favorites_list.verticalScrollBar().valueChanged.connect(
+    favorites_scroll.verticalScrollBar().valueChanged.connect(
         lambda _value: _maybe_load_more()
     )
     # Group rows are QPushButtons that call open_group directly — do not hook
@@ -2908,6 +2933,15 @@ def build_view(icons, ctx=None) -> QWidget:
     refresh_favorites()
     # Deliberately no git work on load: very large groups must not touch the
     # remote until the user asks (Status all, per-card refresh, fetch, …).
+
+    # Home (and others) can jump straight to a group via the event bus.
+    if events is not None:
+        def _on_open_group(group: str = "", **_kwargs) -> None:
+            open_group("" if group is None else str(group))
+
+        events.subscribe(TOPIC_GIT_OPEN_GROUP, _on_open_group)
+        root._git_open_group_handler = _on_open_group  # noqa: SLF001 — retain
+
     return root
 
 
