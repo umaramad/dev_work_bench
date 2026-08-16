@@ -422,48 +422,136 @@ def dependencies_to_html(
     branch: str,
     rows: list[dict],
     title: str = "Maven dependencies",
+    initial_filters: dict | None = None,
 ) -> str:
-    """Self-contained HTML report for the given rows (already filtered)."""
+    """Self-contained interactive HTML report (full scan + client-side filters).
+
+    Embeds every given row. Optional ``initial_filters`` seeds the toolbar
+    (search / scope / conflicts / module) so the export mirrors the app view
+    while Clear still reveals the full set. No CDN — works offline / file://.
+    """
     import html as html_mod
+    import json
     from datetime import datetime, timezone
 
     def esc(value: object) -> str:
         return html_mod.escape(str(value or ""), quote=True)
 
+    filters = {
+        "search": str((initial_filters or {}).get("search") or ""),
+        "scope": str((initial_filters or {}).get("scope") or ""),
+        "conflicts": bool((initial_filters or {}).get("conflicts")),
+        "module": str((initial_filters or {}).get("module") or ""),
+    }
+    filters_json = json.dumps(filters, ensure_ascii=False)
+
+    modules = sorted(
+        {
+            str(row.get("module_id") or "").strip()
+            for row in rows
+            if str(row.get("module_id") or "").strip()
+        }
+    )
+    module_options = ['<option value="">All modules</option>']
+    for module in modules:
+        selected = " selected" if module == filters["module"] else ""
+        module_options.append(f'<option value="{esc(module)}"{selected}>{esc(module)}</option>')
+
+    scope_choices = ("", "compile", "test", "provided", "runtime", "system", "import")
+    scope_options = []
+    for scope in scope_choices:
+        label = "All scopes" if not scope else scope
+        selected = " selected" if scope == filters["scope"] else ""
+        scope_options.append(f'<option value="{esc(scope)}"{selected}>{esc(label)}</option>')
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     body_rows = []
     for row in rows:
-        managed = " yes" if row.get("managed") else ""
+        conflict = bool(row.get("conflict"))
+        managed = bool(row.get("managed"))
+        group = str(row.get("group_id") or "")
+        artifact = str(row.get("artifact_id") or "")
+        version = str(row.get("version") or "")
+        scope = str(row.get("scope") or "")
+        module = str(row.get("module_id") or "")
+        cls = ' class="conflict"' if conflict else ""
         body_rows.append(
-            "<tr>"
-            f"<td>{esc(row.get('group_id'))}</td>"
-            f"<td>{esc(row.get('artifact_id'))}</td>"
-            f"<td>{esc(row.get('version'))}</td>"
-            f"<td>{esc(row.get('scope'))}</td>"
-            f"<td>{esc(row.get('module_id'))}</td>"
-            f"<td>{esc(managed.strip())}</td>"
+            f"<tr{cls}"
+            f' data-group="{esc(group)}"'
+            f' data-artifact="{esc(artifact)}"'
+            f' data-version="{esc(version)}"'
+            f' data-scope="{esc(scope or "compile")}"'
+            f' data-module="{esc(module)}"'
+            f' data-conflict="{"1" if conflict else "0"}"'
+            f' data-managed="{"1" if managed else "0"}">'
+            f"<td>{esc(group)}</td>"
+            f"<td>{esc(artifact)}</td>"
+            f"<td>{esc(version)}</td>"
+            f"<td>{esc(scope)}</td>"
+            f"<td>{esc(module)}</td>"
+            f"<td>{'yes' if managed else ''}</td>"
             "</tr>"
         )
     table_body = "\n".join(body_rows) or (
-        '<tr><td colspan="6">No dependencies in the current view.</td></tr>'
+        '<tr data-empty="1"><td colspan="6">No dependencies in this scan.</td></tr>'
     )
+    conflict_checked = " checked" if filters["conflicts"] else ""
+    search_value = esc(filters["search"])
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <title>{esc(title)}</title>
   <style>
+    :root {{
+      --bg: #f6f7f5; --surface: #fff; --text: #1a1f1c; --muted: #5c6b62;
+      --border: #d5ddd7; --head: #eef3ef; --conflict: rgba(196, 69, 69, 0.12);
+      --accent: #2f6fdd;
+    }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           margin: 24px; color: #1a1f1c; background: #f6f7f5; }}
+           margin: 0; padding: 24px; color: var(--text); background: var(--bg); }}
     h1 {{ font-size: 1.4rem; margin: 0 0 6px; }}
-    .meta {{ color: #5c6b62; font-size: 0.9rem; margin-bottom: 18px; }}
-    table {{ border-collapse: collapse; width: 100%; background: #fff;
-             border: 1px solid #d5ddd7; }}
+    .meta {{ color: var(--muted); font-size: 0.9rem; margin-bottom: 14px; }}
+    .toolbar {{
+      position: sticky; top: 0; z-index: 2;
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 10px 0 12px; margin-bottom: 8px;
+      background: linear-gradient(var(--bg) 70%, transparent);
+    }}
+    .toolbar input[type="search"], .toolbar select {{
+      font: inherit; padding: 6px 10px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--surface); min-width: 140px;
+    }}
+    .toolbar input[type="search"] {{ flex: 1 1 220px; min-width: 180px; }}
+    .toolbar button, .toolbar label.toggle {{
+      font: inherit; padding: 6px 12px; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--surface); cursor: pointer;
+    }}
+    .toolbar label.toggle {{
+      display: inline-flex; align-items: center; gap: 6px; user-select: none;
+    }}
+    .toolbar label.toggle:has(input:checked) {{
+      border-color: #c44545; background: var(--conflict); color: #8b2e2e;
+    }}
+    .toolbar .count {{ color: var(--muted); font-size: 0.88rem; margin-left: auto; }}
+    table {{ border-collapse: collapse; width: 100%; background: var(--surface);
+             border: 1px solid var(--border); }}
     th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4ebe6;
               font-size: 0.88rem; vertical-align: top; }}
-    th {{ background: #eef3ef; font-size: 0.72rem; text-transform: uppercase;
-         letter-spacing: 0.04em; color: #5c6b62; }}
+    th {{ background: var(--head); font-size: 0.72rem; text-transform: uppercase;
+         letter-spacing: 0.04em; color: var(--muted); cursor: pointer;
+         user-select: none; white-space: nowrap; }}
+    th:hover {{ color: var(--text); }}
+    th[data-sort-dir="asc"]::after {{ content: " \\25B2"; font-size: 0.65em; }}
+    th[data-sort-dir="desc"]::after {{ content: " \\25BC"; font-size: 0.65em; }}
+    tr.conflict {{ background: var(--conflict); }}
+    tr[hidden] {{ display: none; }}
     code {{ font-family: ui-monospace, Menlo, monospace; font-size: 0.84rem; }}
+    @media print {{
+      .toolbar {{ position: static; background: none; }}
+      .toolbar button, .toolbar label.toggle {{ display: none; }}
+    }}
   </style>
 </head>
 <body>
@@ -472,23 +560,132 @@ def dependencies_to_html(
     <div><strong>Repo:</strong> <code>{esc(repo_path)}</code></div>
     <div><strong>Branch:</strong> {esc(branch or "—")}</div>
     <div><strong>Generated:</strong> {esc(now)}</div>
-    <div><strong>Rows:</strong> {len(rows)}</div>
+    <div><strong>Embedded rows:</strong> {len(rows)}</div>
   </div>
-  <table>
+  <div class="toolbar" id="toolbar">
+    <input type="search" id="search" placeholder="Search groupId, artifactId, version, module…"
+           value="{search_value}" autocomplete="off"/>
+    <select id="scope" aria-label="Scope">{"".join(scope_options)}</select>
+    <label class="toggle"><input type="checkbox" id="conflicts"{conflict_checked}/> Conflicts</label>
+    <select id="module" aria-label="Module">{"".join(module_options)}</select>
+    <button type="button" id="clear">Clear</button>
+    <span class="count" id="count">{len(rows)} shown / {len(rows)} total</span>
+  </div>
+  <table id="deps">
     <thead>
       <tr>
-        <th>groupId (family)</th>
-        <th>artifactId</th>
-        <th>Version</th>
-        <th>Scope</th>
-        <th>Module</th>
-        <th>Managed</th>
+        <th data-col="group">groupId (family)</th>
+        <th data-col="artifact">artifactId</th>
+        <th data-col="version">Version</th>
+        <th data-col="scope">Scope</th>
+        <th data-col="module">Module</th>
+        <th data-col="managed">Managed</th>
       </tr>
     </thead>
     <tbody>
 {table_body}
     </tbody>
   </table>
+  <script type="application/json" id="initial-filters">{filters_json}</script>
+  <script>
+(function () {{
+  var search = document.getElementById("search");
+  var scope = document.getElementById("scope");
+  var conflicts = document.getElementById("conflicts");
+  var moduleSel = document.getElementById("module");
+  var clearBtn = document.getElementById("clear");
+  var countEl = document.getElementById("count");
+  var tbody = document.querySelector("#deps tbody");
+  var headers = document.querySelectorAll("#deps thead th[data-col]");
+  var sortCol = null;
+  var sortDir = "asc";
+
+  function rows() {{
+    return Array.prototype.slice.call(tbody.querySelectorAll("tr:not([data-empty])"));
+  }}
+
+  function applyFilters() {{
+    var q = (search.value || "").trim().toLowerCase();
+    var sc = scope.value || "";
+    var mod = moduleSel.value || "";
+    var onlyConflict = conflicts.checked;
+    var shown = 0;
+    var total = 0;
+    rows().forEach(function (tr) {{
+      total += 1;
+      var hay = (
+        (tr.getAttribute("data-group") || "") + " " +
+        (tr.getAttribute("data-artifact") || "") + " " +
+        (tr.getAttribute("data-version") || "") + " " +
+        (tr.getAttribute("data-module") || "")
+      ).toLowerCase();
+      var ok = true;
+      if (q && hay.indexOf(q) === -1) ok = false;
+      if (ok && sc && (tr.getAttribute("data-scope") || "compile") !== sc) ok = false;
+      if (ok && mod && (tr.getAttribute("data-module") || "") !== mod) ok = false;
+      if (ok && onlyConflict && tr.getAttribute("data-conflict") !== "1") ok = false;
+      tr.hidden = !ok;
+      if (ok) shown += 1;
+    }});
+    countEl.textContent = shown + " shown / " + total + " total";
+  }}
+
+  function sortBy(col) {{
+    if (sortCol === col) {{
+      sortDir = sortDir === "asc" ? "desc" : "asc";
+    }} else {{
+      sortCol = col;
+      sortDir = "asc";
+    }}
+    headers.forEach(function (th) {{
+      if (th.getAttribute("data-col") === col) th.setAttribute("data-sort-dir", sortDir);
+      else th.removeAttribute("data-sort-dir");
+    }});
+    var list = rows();
+    list.sort(function (a, b) {{
+      var av, bv;
+      if (col === "managed") {{
+        av = a.getAttribute("data-managed") || "0";
+        bv = b.getAttribute("data-managed") || "0";
+      }} else {{
+        av = (a.getAttribute("data-" + col) || "").toLowerCase();
+        bv = (b.getAttribute("data-" + col) || "").toLowerCase();
+      }}
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    }});
+    list.forEach(function (tr) {{ tbody.appendChild(tr); }});
+  }}
+
+  search.addEventListener("input", applyFilters);
+  scope.addEventListener("change", applyFilters);
+  conflicts.addEventListener("change", applyFilters);
+  moduleSel.addEventListener("change", applyFilters);
+  clearBtn.addEventListener("click", function () {{
+    search.value = "";
+    scope.value = "";
+    conflicts.checked = false;
+    moduleSel.value = "";
+    applyFilters();
+  }});
+  headers.forEach(function (th) {{
+    th.addEventListener("click", function () {{
+      sortBy(th.getAttribute("data-col"));
+    }});
+  }});
+
+  try {{
+    var raw = document.getElementById("initial-filters");
+    var init = raw ? JSON.parse(raw.textContent || "{{}}") : {{}};
+    if (init.search != null) search.value = init.search;
+    if (init.scope != null) scope.value = init.scope;
+    if (init.module != null) moduleSel.value = init.module;
+    conflicts.checked = !!init.conflicts;
+  }} catch (e) {{}}
+  applyFilters();
+}})();
+  </script>
 </body>
 </html>
 """

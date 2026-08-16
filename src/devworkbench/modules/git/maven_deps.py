@@ -477,7 +477,7 @@ def build_maven_deps_pane(
         menu.exec(table.viewport().mapToGlobal(pos))
 
     def download_html() -> None:
-        rows = visible_rows()
+        rows = list(state["rows"])
         default_name = f"{os.path.basename(repo_path.rstrip('/')) or 'maven'}-deps.html"
         target, _ = QFileDialog.getSaveFileName(
             root, "Download dependencies as HTML", default_name, "HTML (*.html)"
@@ -486,16 +486,25 @@ def build_maven_deps_pane(
             return
         if not target.lower().endswith(".html"):
             target += ".html"
+        initial_filters = {
+            "search": search.text().strip(),
+            "scope": scope_combo.currentData() or "",
+            "conflicts": bool(conflicts_btn.isChecked()),
+            "module": state.get("selected_module") or "",
+        }
         html = dependencies_to_html(
             repo_path=repo_path,
             branch=branch_text() or "—",
             rows=rows,
             title="Maven dependencies (declared)",
+            initial_filters=initial_filters,
         )
         try:
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(html)
-            status.setText(f"Saved {len(rows)} row(s) → {target}")
+            status.setText(
+                f"Saved interactive report · {len(rows)} embedded row(s) → {target}"
+            )
         except OSError as exc:
             status.setText(f"Could not save HTML: {exc}")
 
