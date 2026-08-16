@@ -196,7 +196,10 @@ QLabel#fieldError { color: #e06c6c; font-size: 11px; }
 QLabel#keychainHint { color: #6d7686; font-size: 11px; }
 QFrame#errorBanner { background: rgba(224, 108, 108, 0.13);
     border: 1px solid rgba(224, 108, 108, 0.55); border-radius: 8px; }
+QFrame#errorBanner[tone="ok"] { background: rgba(91, 141, 239, 0.16);
+    border: 1px solid #5b8def; }
 QLabel#errorBannerText { color: #e06c6c; font-weight: 600; }
+QFrame#errorBanner[tone="ok"] QLabel#errorBannerText { color: #4cc38a; }
 QLabel#errorBannerDetail { color: #a4adbd; font-size: 12px; }
 
 /* ---------- git landing: repo card grid ----------

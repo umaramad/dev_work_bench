@@ -7,7 +7,7 @@ import subprocess
 from typing import Callable
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 
-from devworkbench.ui.theme import current_colors
+from devworkbench.services.configuration_service import TOPIC_SETTINGS_CHANGED
+from devworkbench.ui.theme import token_qcolor
 from devworkbench.ui.widgets.common import button, search_field, styled_label
 from devworkbench.workers.maven_worker import (
     MavenCompareWorker,
@@ -55,6 +56,7 @@ def build_maven_deps_pane(
     is_closed: Callable[[], bool],
     branch_text: Callable[[], str],
     git_executable: Callable[[], str] | None = None,
+    events=None,
 ) -> QWidget:
     """Build the Dependencies view for one opened repository."""
     git_exe = git_executable or (lambda: "git")
@@ -238,8 +240,11 @@ def build_maven_deps_pane(
 
     def render_table() -> None:
         rows = visible_rows()
-        colors = current_colors()
-        conflict_bg = QColor(colors.get("redSoft") or "rgba(224,108,108,0.13)")
+        # Soft red tint for version conflicts (must use token_qcolor — QColor
+        # does not parse CSS rgba() and would paint solid black).
+        conflict_bg = token_qcolor("redSoft", fallback="#e06c6c")
+        if conflict_bg.alpha() == 255:
+            conflict_bg.setAlphaF(0.12)
         table.setSortingEnabled(False)
         table.setRowCount(0)
         table.setRowCount(len(rows))
@@ -657,6 +662,14 @@ def build_maven_deps_pane(
     copy_btn.clicked.connect(lambda: copy_gav(False))
     compare_btn.clicked.connect(compare_branches)
     table.customContextMenuRequested.connect(show_row_menu)
+
+    # Re-tint conflict rows when Appearance theme flips.
+    if events is not None:
+        def _on_setting_changed(key: str = None, value=None) -> None:
+            if key == "appearance.theme" and state.get("loaded"):
+                render_table()
+
+        events.subscribe(TOPIC_SETTINGS_CHANGED, _on_setting_changed)
 
     root.ensure_scanned = lambda: scan() if not state["loaded"] and not state["busy"] else None  # type: ignore[attr-defined]
     root.rescan = scan  # type: ignore[attr-defined]

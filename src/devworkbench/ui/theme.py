@@ -287,7 +287,10 @@ QLabel#fieldError { color: __red; font-size: 11px; }
 QLabel#keychainHint { color: __text3; font-size: 11px; }
 QFrame#errorBanner { background: __redSoft;
     border: 1px solid __redBorder; border-radius: 8px; }
+QFrame#errorBanner[tone="ok"] { background: __accentSoft;
+    border: 1px solid __accent; }
 QLabel#errorBannerText { color: __red; font-weight: 600; }
+QFrame#errorBanner[tone="ok"] QLabel#errorBannerText { color: __green; }
 QLabel#errorBannerDetail { color: __text2; font-size: 12px; }
 
 /* ---------- git landing: repo card grid ----------
@@ -400,10 +403,38 @@ def _render(tokens: dict[str, str]) -> str:
 
 _current: dict[str, str] = DARK
 
+_RGBA_RE = re.compile(
+    r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([0-9.]+))?\s*\)",
+    re.IGNORECASE,
+)
+
 
 def current_colors() -> dict[str, str]:
     """Access the active theme's tokens (for widgets that paint themselves)."""
     return _current
+
+
+def token_qcolor(token: str, *, fallback: str = "#000000") -> QColor:
+    """Resolve a theme token (``#hex`` or CSS ``rgba(...)``) to a ``QColor``.
+
+    ``QColor("rgba(...)")`` is invalid in Qt and paints as solid black — never
+    pass soft tokens like ``redSoft`` directly to ``QColor``.
+    """
+    raw = (_current.get(token) if token in _current else token) or fallback
+    text = str(raw).strip()
+    match = _RGBA_RE.fullmatch(text)
+    if match:
+        r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        alpha = float(match.group(4)) if match.group(4) is not None else 1.0
+        if alpha <= 1.0:
+            a = max(0, min(255, int(round(alpha * 255))))
+        else:
+            a = max(0, min(255, int(round(alpha))))
+        return QColor(r, g, b, a)
+    color = QColor(text)
+    if color.isValid():
+        return color
+    return QColor(fallback)
 
 
 class ThemeManager:

@@ -2588,6 +2588,7 @@ def build_view(icons, ctx=None) -> QWidget:
             is_closed=lambda: bool(getattr(page, "closed", False)),
             branch_text=lambda: branch_pill.text().strip(),
             git_executable=git_exe,
+            events=events,
         )
         repo_inner.addTab(deps_pane, "Dependencies")
 

@@ -484,6 +484,32 @@ class AppearancePage(SettingsPage):
             return _FontSizeRow()
         return super()._make_control(spec)
 
+    def _on_edit(self, *_args) -> None:
+        """Theme switches live (persisted immediately); other fields stay dirty until Apply."""
+        if self._loading:
+            return
+        theme_field = next((f for f in self._fields if f.key == "appearance.theme"), None)
+        if theme_field is not None and self.sender() is theme_field.widget:
+            value = theme_field.value()
+            if self._service is not None and value != self._service.get("appearance.theme"):
+                self._service.set("appearance.theme", value)
+            return
+        super()._on_edit(*_args)
+
+    def sync_theme_controls(self) -> None:
+        """Keep theme combo / accent swatches aligned after an external toggle."""
+        if self._service is None:
+            return
+        self._loading = True
+        try:
+            for field in self._fields:
+                if field.key == "appearance.theme":
+                    field.set_value(self._service.get(field.key))
+                elif field.key == "appearance.accent":
+                    field.set_value(field.value())  # repaint borders for new tokens
+        finally:
+            self._loading = False
+
     def _build_extra(self, layout: QVBoxLayout) -> None:
         """Workspace chrome moved here from the old top toolbar."""
         box = QGroupBox("Workspace")
@@ -492,8 +518,8 @@ class AppearancePage(SettingsPage):
         group_layout.setSpacing(10)
 
         hint = QLabel(
-            "Panels and tools that used to sit on the top toolbar. "
-            "Shortcuts still work from the View / Edit menus and the command palette."
+            "Theme applies immediately. Panels and tools that used to sit on the "
+            "top toolbar still work from the View / Edit menus and the command palette."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)

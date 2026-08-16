@@ -415,25 +415,36 @@ class MainWindow(QMainWindow):
                 name = "dark"
         if name not in THEMES:
             name = "dark"
-        self.theme.apply(name)
-        # Re-tint every action and tab icon for the new theme (icons are
-        # cached per resolved color, so fresh hex values yield fresh pixmaps).
-        for action in self.findChildren(QAction):
-            key = action.data()
-            if isinstance(key, str) and key:
-                action.setIcon(self._icons.get(key, 16))
-        for index, module in enumerate(self._modules):
-            self.workspace.setTabIcon(index, self._icons.get(module.icon, 16))
-        self.sidebar._recolor()
-        # Re-tint the Settings category rail too (icons cached per color) —
-        # but only if the screen exists: a theme toggle must not force-build
-        # the Settings view (that would defeat lazy loading).
-        settings_view = self._built_views.get(self._module_index("settings"))
-        if settings_view is not None and hasattr(settings_view, "recolor"):
-            settings_view.recolor()
-        self.status_bar.set_message(f"Theme: {name}")
-        for i in range(self.workspace.count()):
-            self.workspace.widget(i).update()
+        # Freeze paint while swapping palette + stylesheet to reduce flicker.
+        app = QApplication.instance()
+        self.setUpdatesEnabled(False)
+        if app is not None:
+            app.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.theme.apply(name)
+            # Re-tint every action and tab icon for the new theme (icons are
+            # cached per resolved color, so fresh hex values yield fresh pixmaps).
+            for action in self.findChildren(QAction):
+                key = action.data()
+                if isinstance(key, str) and key:
+                    action.setIcon(self._icons.get(key, 16))
+            for index, module in enumerate(self._modules):
+                self.workspace.setTabIcon(index, self._icons.get(module.icon, 16))
+            self.sidebar._recolor()
+            # Re-tint the Settings category rail too (icons cached per color) —
+            # but only if the screen exists: a theme toggle must not force-build
+            # the Settings view (that would defeat lazy loading).
+            settings_view = self._built_views.get(self._module_index("settings"))
+            if settings_view is not None and hasattr(settings_view, "recolor"):
+                settings_view.recolor()
+            self.status_bar.set_message(f"Theme: {name}")
+            for i in range(self.workspace.count()):
+                self.workspace.widget(i).update()
+        finally:
+            self.setUpdatesEnabled(True)
+            if app is not None:
+                app.restoreOverrideCursor()
+                app.processEvents()
 
     def _on_setting_changed(self, key: str = None, value=None) -> None:
         if key == "appearance.theme":

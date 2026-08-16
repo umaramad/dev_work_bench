@@ -8,7 +8,7 @@ land in SQLite, secrets in the macOS Keychain. Applying also publishes
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 from devworkbench.core.events import EventBus
 from devworkbench.core.settings import SettingsManager
 from devworkbench.modules.base import Module
-from devworkbench.modules.settings.pages import PAGES, SettingsPage
+from devworkbench.modules.settings.pages import AppearancePage, PAGES, SettingsPage
 from devworkbench.services.configuration_service import (
     TOPIC_NAVIGATION_REQUEST,
     ConfigurationService,
@@ -172,7 +172,14 @@ class SettingsView(QWidget):
         self._reload_all()
 
     def _on_apply(self) -> None:
-        values = self._collect_all()
+        if not self._dirty_pages:
+            self._flash_banner("No unsaved changes", "Change a setting first, then Apply.", error=False)
+            return
+        # Only persist dirty pages — avoids unrelated validators (e.g. git path)
+        # blocking Appearance saves.
+        values: dict = {}
+        for page in self._dirty_pages:
+            values.update(page.collect())
         if self._service is not None:
             errors = self._service.apply(values)
         else:
@@ -181,8 +188,14 @@ class SettingsView(QWidget):
             self._show_errors(errors)
             return
         self._reload_all()
+        self._flash_banner("Applied", "Settings saved.", error=False)
 
     def _on_save(self) -> None:
+        if not self._dirty_pages:
+            self._flash_banner("No unsaved changes", "Nothing to save — leaving Settings.", error=False)
+            if self._events is not None:
+                self._events.publish(TOPIC_NAVIGATION_REQUEST, module_id=self._return_module)
+            return
         self._on_apply()
         if self._dirty_pages:
             return  # validation failed; stay and let the user fix it
@@ -195,6 +208,19 @@ class SettingsView(QWidget):
         """Re-fetch nav icons for the active theme (called on theme switch)."""
         for index, page_type in enumerate(PAGES):
             self._nav.item(index).setIcon(self._icons.get(page_type.icon, 16))
+        # Keep Appearance theme combo / swatches in sync after a live toggle.
+        appearance = self._page_of.get(AppearancePage)
+        if appearance is not None and hasattr(appearance, "sync_theme_controls"):
+            appearance.sync_theme_controls()
+
+    def _flash_banner(self, title: str, detail: str, *, error: bool = True) -> None:
+        self._banner_title.setText(title)
+        self._banner_detail.setText(detail)
+        self._error_banner.setProperty("tone", "error" if error else "ok")
+        self._error_banner.style().unpolish(self._error_banner)
+        self._error_banner.style().polish(self._error_banner)
+        self._error_banner.show()
+        QTimer.singleShot(2200, self._error_banner.hide)
 
     def _current_page(self) -> SettingsPage | None:
         row = self._nav.currentRow()
@@ -224,6 +250,9 @@ class SettingsView(QWidget):
                 break
         self._banner_title.setText(f"Fix {len(errors)} issue{'s' if len(errors) != 1 else ''} before saving")
         self._banner_detail.setText(next(iter(errors.values())))
+        self._error_banner.setProperty("tone", "error")
+        self._error_banner.style().unpolish(self._error_banner)
+        self._error_banner.style().polish(self._error_banner)
         self._error_banner.show()
 
     def _refresh_nav_dots(self) -> None:
@@ -236,9 +265,16 @@ class SettingsView(QWidget):
     def _refresh_footer(self) -> None:
         dirty = bool(self._dirty_pages)
         self._dirty_label.setVisible(dirty)
-        self._buttons["Apply"].setEnabled(dirty)
-        self._buttons["Save"].setEnabled(dirty)
+        # Always clickable — disabled buttons feel dead; empty Apply shows feedback.
+        self._buttons["Apply"].setEnabled(True)
+        self._buttons["Save"].setEnabled(True)
         self._buttons["Cancel"].setEnabled(dirty)
+        self._buttons["Apply"].setToolTip(
+            "Apply unsaved changes" if dirty else "No unsaved changes"
+        )
+        self._buttons["Save"].setToolTip(
+            "Apply and return" if dirty else "Return (nothing to save)"
+        )
 
 
 # ---------------------------------------------------------------------------
