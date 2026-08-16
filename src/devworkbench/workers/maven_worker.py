@@ -545,12 +545,18 @@ def dependencies_to_html(
     th:hover {{ color: var(--text); }}
     th[data-sort-dir="asc"]::after {{ content: " \\25B2"; font-size: 0.65em; }}
     th[data-sort-dir="desc"]::after {{ content: " \\25BC"; font-size: 0.65em; }}
-    tr.conflict {{ background: var(--conflict); }}
+    tbody tr {{ cursor: pointer; user-select: none; }}
+    tbody tr:hover {{ background: rgba(47, 111, 221, 0.06); }}
+    tbody tr.conflict {{ background: var(--conflict); }}
+    tbody tr.conflict:hover {{ background: rgba(196, 69, 69, 0.18); }}
+    tbody tr.selected {{ background: rgba(47, 111, 221, 0.18); outline: 1px solid var(--accent); }}
+    tbody tr.conflict.selected {{ background: rgba(47, 111, 221, 0.22); }}
     tr[hidden] {{ display: none; }}
     code {{ font-family: ui-monospace, Menlo, monospace; font-size: 0.84rem; }}
     @media print {{
       .toolbar {{ position: static; background: none; }}
       .toolbar button, .toolbar label.toggle {{ display: none; }}
+      tbody tr.selected {{ outline: none; }}
     }}
   </style>
 </head>
@@ -569,6 +575,8 @@ def dependencies_to_html(
     <label class="toggle"><input type="checkbox" id="conflicts"{conflict_checked}/> Conflicts</label>
     <select id="module" aria-label="Module">{"".join(module_options)}</select>
     <button type="button" id="clear">Clear</button>
+    <button type="button" id="copy-tsv" title="Copy selected rows, or all filtered if none selected (TSV)">Copy TSV</button>
+    <button type="button" id="copy-md" title="Copy selected rows, or all filtered if none selected (Markdown)">Copy Markdown</button>
     <span class="count" id="count">{len(rows)} shown / {len(rows)} total</span>
   </div>
   <table id="deps">
@@ -594,14 +602,94 @@ def dependencies_to_html(
   var conflicts = document.getElementById("conflicts");
   var moduleSel = document.getElementById("module");
   var clearBtn = document.getElementById("clear");
+  var copyTsvBtn = document.getElementById("copy-tsv");
+  var copyMdBtn = document.getElementById("copy-md");
   var countEl = document.getElementById("count");
   var tbody = document.querySelector("#deps tbody");
   var headers = document.querySelectorAll("#deps thead th[data-col]");
   var sortCol = null;
   var sortDir = "asc";
+  var lastAnchor = null;
 
   function rows() {{
     return Array.prototype.slice.call(tbody.querySelectorAll("tr:not([data-empty])"));
+  }}
+
+  function visibleRows() {{
+    return rows().filter(function (tr) {{ return !tr.hidden; }});
+  }}
+
+  function selectedRows() {{
+    return visibleRows().filter(function (tr) {{ return tr.classList.contains("selected"); }});
+  }}
+
+  function clearSelection() {{
+    rows().forEach(function (tr) {{ tr.classList.remove("selected"); }});
+    lastAnchor = null;
+    updateCount();
+  }}
+
+  function updateCount() {{
+    var shown = visibleRows().length;
+    var total = rows().length;
+    var sel = selectedRows().length;
+    countEl.textContent = shown + " shown / " + total + " total"
+      + (sel ? (" · " + sel + " selected") : "");
+  }}
+
+  function cellText(tr, key) {{
+    if (key === "managed") return tr.getAttribute("data-managed") === "1" ? "yes" : "";
+    return tr.getAttribute("data-" + key) || "";
+  }}
+
+  function rowsForCopy() {{
+    var selected = selectedRows();
+    return selected.length ? selected : visibleRows();
+  }}
+
+  function tableText(fmt) {{
+    var cols = ["group", "artifact", "version", "scope", "module", "managed"];
+    var labels = ["groupId", "artifactId", "version", "scope", "module", "managed"];
+    var list = rowsForCopy();
+    if (fmt === "markdown") {{
+      var lines = [
+        "| " + labels.join(" | ") + " |",
+        "| " + labels.map(function () {{ return "---"; }}).join(" | ") + " |"
+      ];
+      list.forEach(function (tr) {{
+        var vals = cols.map(function (c) {{
+          return cellText(tr, c).replace(/\\|/g, "\\\\|");
+        }});
+        lines.push("| " + vals.join(" | ") + " |");
+      }});
+      return lines.join("\\n") + "\\n";
+    }}
+    var out = [labels.join("\\t")];
+    list.forEach(function (tr) {{
+      out.push(cols.map(function (c) {{ return cellText(tr, c); }}).join("\\t"));
+    }});
+    return out.join("\\n") + "\\n";
+  }}
+
+  function flashCopy(btn, n) {{
+    var prev = btn.textContent;
+    btn.textContent = "Copied " + n;
+    setTimeout(function () {{ btn.textContent = prev; }}, 1400);
+  }}
+
+  function copyTable(fmt) {{
+    var list = rowsForCopy();
+    var text = tableText(fmt);
+    var btn = fmt === "markdown" ? copyMdBtn : copyTsvBtn;
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(text).then(function () {{
+        flashCopy(btn, list.length);
+      }}).catch(function () {{
+        window.prompt("Copy this table:", text);
+      }});
+    }} else {{
+      window.prompt("Copy this table:", text);
+    }}
   }}
 
   function applyFilters() {{
@@ -609,10 +697,7 @@ def dependencies_to_html(
     var sc = scope.value || "";
     var mod = moduleSel.value || "";
     var onlyConflict = conflicts.checked;
-    var shown = 0;
-    var total = 0;
     rows().forEach(function (tr) {{
-      total += 1;
       var hay = (
         (tr.getAttribute("data-group") || "") + " " +
         (tr.getAttribute("data-artifact") || "") + " " +
@@ -625,9 +710,36 @@ def dependencies_to_html(
       if (ok && mod && (tr.getAttribute("data-module") || "") !== mod) ok = false;
       if (ok && onlyConflict && tr.getAttribute("data-conflict") !== "1") ok = false;
       tr.hidden = !ok;
-      if (ok) shown += 1;
+      if (!ok) tr.classList.remove("selected");
     }});
-    countEl.textContent = shown + " shown / " + total + " total";
+    updateCount();
+  }}
+
+  function onRowClick(ev) {{
+    var tr = ev.target.closest("tr");
+    if (!tr || !tbody.contains(tr) || tr.hidden || tr.getAttribute("data-empty")) return;
+    var visible = visibleRows();
+    var idx = visible.indexOf(tr);
+    if (idx < 0) return;
+    var multi = ev.metaKey || ev.ctrlKey;
+    var range = ev.shiftKey && lastAnchor != null;
+    if (range) {{
+      var a = visible.indexOf(lastAnchor);
+      if (a < 0) a = idx;
+      var lo = Math.min(a, idx), hi = Math.max(a, idx);
+      if (!multi) {{
+        visible.forEach(function (r) {{ r.classList.remove("selected"); }});
+      }}
+      for (var i = lo; i <= hi; i++) visible[i].classList.add("selected");
+    }} else if (multi) {{
+      tr.classList.toggle("selected");
+      lastAnchor = tr;
+    }} else {{
+      visible.forEach(function (r) {{ r.classList.remove("selected"); }});
+      tr.classList.add("selected");
+      lastAnchor = tr;
+    }}
+    updateCount();
   }}
 
   function sortBy(col) {{
@@ -667,8 +779,12 @@ def dependencies_to_html(
     scope.value = "";
     conflicts.checked = false;
     moduleSel.value = "";
+    clearSelection();
     applyFilters();
   }});
+  copyTsvBtn.addEventListener("click", function () {{ copyTable("tsv"); }});
+  copyMdBtn.addEventListener("click", function () {{ copyTable("markdown"); }});
+  tbody.addEventListener("click", onRowClick);
   headers.forEach(function (th) {{
     th.addEventListener("click", function () {{
       sortBy(th.getAttribute("data-col"));
@@ -740,6 +856,41 @@ def top_families(rows: list[dict], *, limit: int = 10) -> list[tuple[str, int]]:
         counts[fam] = counts.get(fam, 0) + 1
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].casefold()))
     return ranked[:limit]
+
+
+def dependencies_table_text(rows: list[dict], *, fmt: str = "tsv") -> str:
+    """Plain table of filtered deps for clipboard paste (email / chat).
+
+    ``fmt`` is ``tsv`` (tab-separated, Excel-friendly) or ``markdown``.
+    Columns match the interactive HTML report.
+    """
+    headers = ("groupId", "artifactId", "version", "scope", "module", "managed")
+
+    def cells(row: dict) -> tuple[str, ...]:
+        return (
+            str(row.get("group_id") or ""),
+            str(row.get("artifact_id") or ""),
+            str(row.get("version") or ""),
+            str(row.get("scope") or ""),
+            str(row.get("module_id") or ""),
+            "yes" if row.get("managed") else "",
+        )
+
+    if fmt == "markdown":
+        lines = [
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join("---" for _ in headers) + " |",
+        ]
+        for row in rows:
+            safe = [c.replace("|", "\\|") for c in cells(row)]
+            lines.append("| " + " | ".join(safe) + " |")
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    # Default: TSV
+    lines = ["\t".join(headers)]
+    for row in rows:
+        lines.append("\t".join(cells(row)))
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def dependencies_to_csv(rows: list[dict]) -> str:

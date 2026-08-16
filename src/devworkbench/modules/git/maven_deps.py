@@ -38,6 +38,7 @@ from devworkbench.workers.maven_worker import (
     MavenCompareWorker,
     MavenPomWorker,
     current_branch_name,
+    dependencies_table_text,
     dependencies_to_csv,
     dependencies_to_html,
     enrich_dependency_rows,
@@ -100,6 +101,18 @@ def build_maven_deps_pane(
     copy_btn = button("Copy GAV", "ghost")
     copy_btn.setObjectName("mavenDepCopy")
     toolbar_layout.addWidget(copy_btn)
+    copy_table_btn = QToolButton()
+    copy_table_btn.setObjectName("mavenDepCopyTable")
+    copy_table_btn.setText("Copy table")
+    copy_table_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+    copy_table_btn.setToolTip(
+        "Copy selected rows (or all filtered if none selected) with headers"
+    )
+    copy_table_menu = QMenu(copy_table_btn)
+    copy_tsv_action = copy_table_menu.addAction("Tab-separated (Excel / email)")
+    copy_md_action = copy_table_menu.addAction("Markdown (Slack / Teams)")
+    copy_table_btn.setMenu(copy_table_menu)
+    toolbar_layout.addWidget(copy_table_btn)
     csv_btn = button("Download CSV", "ghost")
     csv_btn.setObjectName("mavenDepCsv")
     toolbar_layout.addWidget(csv_btn)
@@ -143,7 +156,7 @@ def build_maven_deps_pane(
     table.verticalHeader().setVisible(False)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     table.setSortingEnabled(True)
     table.setAlternatingRowColors(True)
     table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -178,6 +191,7 @@ def build_maven_deps_pane(
             download_btn,
             csv_btn,
             copy_btn,
+            copy_table_btn,
             compare_btn,
             conflicts_btn,
         ):
@@ -409,28 +423,52 @@ def build_maven_deps_pane(
         worker.signals.error.connect(failed)
         QThreadPool.globalInstance().start(worker)
 
-    def selected_row() -> dict | None:
-        items = table.selectedItems()
-        if not items:
-            return None
-        # Map through UserRole because sorting may reorder visual rows.
-        idx = items[0].data(Qt.ItemDataRole.UserRole)
+    def selected_rows() -> list[dict]:
+        """Return selected dependency rows in visual top-to-bottom order."""
         rows = state.get("row_by_index") or []
-        if isinstance(idx, int) and 0 <= idx < len(rows):
-            return rows[idx]
-        row = table.currentRow()
-        if 0 <= row < len(rows):
-            return rows[row]
-        return None
+        seen: set[int] = set()
+        ordered: list[tuple[int, dict]] = []
+        for item in table.selectedItems():
+            idx = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(idx, int) or idx in seen or not (0 <= idx < len(rows)):
+                continue
+            seen.add(idx)
+            ordered.append((item.row(), rows[idx]))
+        ordered.sort(key=lambda pair: pair[0])
+        return [row for _, row in ordered]
+
+    def selected_row() -> dict | None:
+        rows = selected_rows()
+        return rows[0] if rows else None
 
     def copy_gav(as_xml: bool = False) -> None:
-        row = selected_row()
-        if row is None:
-            status.setText("Select a dependency row first.")
+        rows = selected_rows()
+        if not rows:
+            status.setText("Select one or more dependency rows first.")
             return
-        text = maven_xml_snippet(row) if as_xml else gav_string(row)
+        if as_xml:
+            text = "\n\n".join(maven_xml_snippet(row) for row in rows)
+            QApplication.clipboard().setText(text)
+            status.setText(f"Copied Maven XML for {len(rows)} row(s)")
+            return
+        text = "\n".join(gav_string(row) for row in rows)
         QApplication.clipboard().setText(text)
-        status.setText("Copied Maven XML" if as_xml else f"Copied {gav_string(row)}")
+        if len(rows) == 1:
+            status.setText(f"Copied {gav_string(rows[0])}")
+        else:
+            status.setText(f"Copied {len(rows)} GAV(s)")
+
+    def copy_filtered_table(fmt: str = "tsv") -> None:
+        selected = selected_rows()
+        rows = selected if selected else visible_rows()
+        if not rows:
+            status.setText("No rows to copy.")
+            return
+        text = dependencies_table_text(rows, fmt=fmt)
+        QApplication.clipboard().setText(text)
+        kind = "Markdown" if fmt == "markdown" else "tab-separated"
+        scope = "selected" if selected else "filtered"
+        status.setText(f"Copied {len(rows)} {scope} row(s) as {kind} table")
 
     def reveal_pom() -> None:
         row = selected_row()
@@ -459,18 +497,25 @@ def build_maven_deps_pane(
             status.setText(f"Opened {path}")
 
     def show_row_menu(pos) -> None:
-        row = selected_row()
-        if row is None:
-            # Try select under cursor
-            index = table.indexAt(pos)
-            if index.isValid():
+        index = table.indexAt(pos)
+        if index.isValid():
+            # Keep multi-selection if the clicked row is already selected.
+            item = table.item(index.row(), 0)
+            already = bool(item and item.isSelected())
+            if not already:
                 table.selectRow(index.row())
-                row = selected_row()
-        if row is None:
+        rows = selected_rows()
+        if not rows:
             return
         menu = QMenu(table)
         menu.addAction("Copy GAV").triggered.connect(lambda: copy_gav(False))
         menu.addAction("Copy Maven XML").triggered.connect(lambda: copy_gav(True))
+        menu.addAction("Copy selected/filtered table (TSV)").triggered.connect(
+            lambda: copy_filtered_table("tsv")
+        )
+        menu.addAction("Copy selected/filtered table (Markdown)").triggered.connect(
+            lambda: copy_filtered_table("markdown")
+        )
         menu.addSeparator()
         menu.addAction("Reveal pom.xml").triggered.connect(reveal_pom)
         menu.addAction("Open pom.xml").triggered.connect(open_pom)
@@ -669,6 +714,9 @@ def build_maven_deps_pane(
     download_btn.clicked.connect(download_html)
     csv_btn.clicked.connect(download_csv)
     copy_btn.clicked.connect(lambda: copy_gav(False))
+    copy_table_btn.clicked.connect(lambda: copy_filtered_table("tsv"))
+    copy_tsv_action.triggered.connect(lambda: copy_filtered_table("tsv"))
+    copy_md_action.triggered.connect(lambda: copy_filtered_table("markdown"))
     compare_btn.clicked.connect(compare_branches)
     table.customContextMenuRequested.connect(show_row_menu)
 
