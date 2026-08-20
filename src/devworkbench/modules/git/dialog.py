@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QThreadPool, Qt
+from PySide6.QtCore import QSize, QThreadPool, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -220,6 +221,34 @@ class RepoDialog(QDialog):
             self.path_edit.setText(chosen)
 
 
+def rename_favorite_group(favorites_repo, old_name: str, new_name: str) -> str | None:
+    """Rename a group across all folder favorites.
+
+    Returns an error message, or ``None`` on success.
+    """
+    old = (old_name or "").strip()
+    new = (new_name or "").strip()
+    if not old:
+        return "Ungrouped cannot be renamed."
+    if not new:
+        return "A group name is required."
+    if new == old:
+        return "That is the current name — nothing to rename."
+    counts: dict[str, int] = {}
+    for favorite in favorites_repo.by_kind("folder", limit=None):
+        group = (favorite.group_name or "").strip()
+        if group:
+            counts[group] = counts.get(group, 0) + 1
+    other_names = {g.casefold() for g in counts if g != old}
+    if new.casefold() in other_names:
+        return f"A group named “{new}” already exists — use Merge instead."
+    for favorite in favorites_repo.by_kind("folder", limit=None):
+        if (favorite.group_name or "").strip() == old:
+            favorite.group_name = new
+            favorites_repo.update(favorite)
+    return None
+
+
 class GroupManagerDialog(QDialog):
     """Organize repository groups on the Git home page.
 
@@ -234,8 +263,8 @@ class GroupManagerDialog(QDialog):
         super().__init__(parent)
         self._repo = favorites_repo
         self.setWindowTitle("Manage groups")
-        self.setMinimumWidth(480)
-        self.setMinimumHeight(380)
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(440)
         self._build()
         self._reload_groups()
 
@@ -243,26 +272,40 @@ class GroupManagerDialog(QDialog):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
 
+        title = QLabel("Manage groups")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
         intro = QLabel(
-            "Repositories are organized into groups. Rename a group, merge two "
-            "groups, or delete a group — its repositories move to Ungrouped."
+            "Rename a group, merge two groups, or delete a group — "
+            "its repositories move to Ungrouped."
         )
         intro.setObjectName("hint")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        list_frame = QFrame()
+        list_frame.setObjectName("groupManagePanel")
+        list_layout = QVBoxLayout(list_frame)
+        list_layout.setContentsMargins(10, 10, 10, 10)
+        list_layout.setSpacing(8)
+        list_heading = QLabel("GROUPS")
+        list_heading.setObjectName("groupsHeading")
+        list_layout.addWidget(list_heading)
+
         self.group_list = QListWidget()
-        self.group_list.setObjectName("groupList")
-        self.group_list.setFrameStyle(0)
+        self.group_list.setObjectName("groupManageList")
+        self.group_list.setSpacing(4)
+        self.group_list.setUniformItemSizes(False)
         self.group_list.currentRowChanged.connect(lambda _row: self._sync_actions())
-        layout.addWidget(self.group_list, 1)
+        list_layout.addWidget(self.group_list, 1)
+        layout.addWidget(list_frame, 1)
 
         # Action row.
         actions = QHBoxLayout()
-        actions.setSpacing(6)
+        actions.setSpacing(8)
         self.rename_button = button("Rename…", "ghost")
         self.rename_button.setObjectName("renameGroupButton")
         self.merge_button = button("Merge…", "ghost")
@@ -279,12 +322,18 @@ class GroupManagerDialog(QDialog):
         layout.addLayout(actions)
 
         # Inline editor panels (one at a time, non-modal).
+        editor_frame = QFrame()
+        editor_frame.setObjectName("groupManageEditor")
+        editor_layout = QVBoxLayout(editor_frame)
+        editor_layout.setContentsMargins(12, 12, 12, 12)
+        editor_layout.setSpacing(8)
         self._editor = QStackedWidget()
         self._editor.addWidget(self._empty_panel())
         self._editor.addWidget(self._rename_panel())
         self._editor.addWidget(self._merge_panel())
         self._editor.addWidget(self._delete_panel())
-        layout.addWidget(self._editor)
+        editor_layout.addWidget(self._editor)
+        layout.addWidget(editor_frame)
 
         # Status lines: success hint + inline error (styled like field errors).
         self._hint = styled_label("", "hint")
@@ -395,9 +444,27 @@ class GroupManagerDialog(QDialog):
         counts = self._group_counts()
         self.group_list.clear()
         for group in sorted(counts, key=str.casefold):
-            item = QListWidgetItem(f"{group}  ·  {counts[group]}")
+            count = counts[group]
+            noun = "repo" if count == 1 else "repos"
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, group)
+            item.setSizeHint(QSize(0, 52))
             self.group_list.addItem(item)
+
+            row = QWidget()
+            row.setObjectName("groupManageRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(12, 8, 12, 8)
+            row_layout.setSpacing(10)
+            name_label = QLabel(group)
+            name_label.setObjectName("groupManageName")
+            name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            row_layout.addWidget(name_label, 1)
+            badge = QLabel(f"{count} {noun}")
+            badge.setObjectName("groupManageBadge")
+            badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            row_layout.addWidget(badge, 0, Qt.AlignmentFlag.AlignRight)
+            self.group_list.setItemWidget(item, row)
         index = -1
         for i in range(self.group_list.count()):
             if self.group_list.item(i).data(Qt.ItemDataRole.UserRole) == selected:
@@ -405,6 +472,8 @@ class GroupManagerDialog(QDialog):
                 break
         if index >= 0:
             self.group_list.setCurrentRow(index)
+        elif self.group_list.count():
+            self.group_list.setCurrentRow(0)
         self._sync_actions()
 
     # -- panels / actions --------------------------------------------------------
@@ -468,24 +537,19 @@ class GroupManagerDialog(QDialog):
     def _apply_rename(self) -> None:
         group = self._current_group()
         new_name = self.rename_edit.text().strip()
-        if not new_name:
-            self._error("A group name is required.")
+        if group is None:
             return
-        if new_name == group:
-            self._error("That is the current name — nothing to rename.")
+        error = rename_favorite_group(self._repo, group, new_name)
+        if error:
+            self._error(error)
             return
-        # Block case-insensitive collisions with *other* groups, while still
-        # allowing a pure case change of the selected group ("Work" -> "work").
-        other_names = {g.casefold() for g in self._group_counts() if g != group}
-        if new_name.casefold() in other_names:
-            self._error(f"A group named “{new_name}” already exists — use Merge instead.")
-            return
-        for favorite in self._repo.by_kind("folder"):
-            if (favorite.group_name or "").strip() == group:
-                favorite.group_name = new_name
-                self._repo.update(favorite)
         self._hide_editor()
         self._reload_groups()
+        # Select the renamed group if it still exists.
+        for i in range(self.group_list.count()):
+            if self.group_list.item(i).data(Qt.ItemDataRole.UserRole) == new_name:
+                self.group_list.setCurrentRow(i)
+                break
         self._set_hint(f"Renamed “{group}” to “{new_name}”.")
 
     def _apply_merge(self) -> None:
@@ -1026,3 +1090,157 @@ class ActionPlaceholdersDialog(QDialog):
 
     def values(self) -> dict[str, str]:
         return dict(getattr(self, "_values", {}))
+
+
+class RepoFilesDialog(QDialog):
+    """Modal list of files for Local changes or Diff vs remote on one repo."""
+
+    MODE_LOCAL = "local"
+    MODE_REMOTE = "remote"
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        path: str,
+        repo_name: str,
+        mode: str,
+        git_executable: str = "git",
+        pending_workers: list | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._path = path
+        self._mode = mode if mode in (self.MODE_LOCAL, self.MODE_REMOTE) else self.MODE_LOCAL
+        self._exe = git_executable or "git"
+        self._pending = pending_workers if pending_workers is not None else []
+        self._busy = False
+        title_mode = "Local changes" if self._mode == self.MODE_LOCAL else "Diff vs remote"
+        self.setWindowTitle(f"{title_mode} — {repo_name or os.path.basename(path)}")
+        self.setMinimumSize(560, 420)
+        self._build()
+        self._load()
+
+    def _build(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        self._subtitle = styled_label("", "hint")
+        self._subtitle.setWordWrap(True)
+        layout.addWidget(self._subtitle)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
+        self._refresh = button("Refresh", "ghost")
+        self._refresh.clicked.connect(self._load)
+        toolbar.addWidget(self._refresh)
+        toolbar.addStretch(1)
+        self._count = styled_label("", "hint")
+        toolbar.addWidget(self._count)
+        layout.addLayout(toolbar)
+
+        self._error = styled_label("", "hint")
+        self._error.setObjectName("fieldError")
+        self._error.hide()
+        layout.addWidget(self._error)
+
+        self._table = QTableWidget(0, 2)
+        self._table.setHorizontalHeaderLabels(["Status", "Path"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.setSortingEnabled(True)
+        self._table.setAlternatingRowColors(True)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self._table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+    def _load(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self._refresh.setEnabled(False)
+        self._error.hide()
+        self._subtitle.setText("Loading…")
+        self._count.setText("")
+        op = (
+            "working_tree_status"
+            if self._mode == self.MODE_LOCAL
+            else "diff_vs_upstream"
+        )
+        worker = GitWorker(op, self._path, executable=self._exe)
+        self._pending.append(worker)
+
+        def _done(result) -> None:
+            self._busy = False
+            self._refresh.setEnabled(True)
+            if worker in self._pending:
+                self._pending.remove(worker)
+            self._apply(result if isinstance(result, dict) else {})
+
+        def _err(exc) -> None:
+            self._busy = False
+            self._refresh.setEnabled(True)
+            if worker in self._pending:
+                self._pending.remove(worker)
+            self._subtitle.setText("")
+            self._error.setText(str(exc) if exc else "Failed")
+            self._error.show()
+            self._table.setRowCount(0)
+            self._count.setText("0 files")
+
+        worker.signals.finished.connect(_done)
+        worker.signals.error.connect(_err)
+        QThreadPool.globalInstance().start(worker)
+
+    def _apply(self, result: dict) -> None:
+        if self._mode == self.MODE_LOCAL:
+            if not result.get("ok"):
+                self._subtitle.setText("")
+                self._error.setText(str(result.get("error") or "Could not read status"))
+                self._error.show()
+                self._fill([])
+                return
+            self._subtitle.setText(f"Working tree · {self._path}")
+            self._fill(list(result.get("files") or []))
+            return
+
+        upstream = result.get("upstream") or "—"
+        dirty_hint = int(result.get("dirty_hint_count") or 0)
+        if not result.get("ok"):
+            self._subtitle.setText(f"Comparing to {upstream}" if result.get("upstream") else "")
+            self._error.setText(str(result.get("error") or "Could not diff vs remote"))
+            self._error.show()
+            self._fill([])
+            return
+        hint = ""
+        if dirty_hint:
+            hint = f" · Also {dirty_hint} local uncommitted change(s) — use Local changes…"
+        self._subtitle.setText(f"Comparing to {upstream}{hint}")
+        self._fill(list(result.get("files") or []))
+
+    def _fill(self, files: list[dict]) -> None:
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(0)
+        self._table.setRowCount(len(files))
+        for index, row in enumerate(files):
+            status = str(row.get("status") or row.get("code") or "")
+            path = str(row.get("path") or "")
+            status_item = QTableWidgetItem(status)
+            path_item = QTableWidgetItem(path)
+            status_item.setToolTip(str(row.get("code") or status))
+            path_item.setToolTip(path)
+            self._table.setItem(index, 0, status_item)
+            self._table.setItem(index, 1, path_item)
+        self._table.setSortingEnabled(True)
+        if not files and not self._error.isVisible():
+            self._count.setText("Working tree clean" if self._mode == self.MODE_LOCAL else "No differences vs remote")
+        else:
+            self._count.setText(f"{len(files)} file(s)")

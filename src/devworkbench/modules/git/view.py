@@ -30,10 +30,12 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -57,7 +59,9 @@ from devworkbench.modules.git.dialog import (
     EditGroupActionsDialog,
     GroupManagerDialog,
     RepoDialog,
+    RepoFilesDialog,
     ScanReposDialog,
+    rename_favorite_group,
 )
 from devworkbench.modules.git.maven_deps import build_maven_deps_pane
 from devworkbench.services.configuration_service import TOPIC_GIT_OPEN_GROUP
@@ -654,6 +658,22 @@ def build_view(icons, ctx=None) -> QWidget:
         _bump_font(remote_pill, 1, 12)
         foot.addWidget(remote_pill, 0, Qt.AlignmentFlag.AlignLeft)
 
+        # Local working-tree dirty count — click opens Local changes modal.
+        changes_btn = QPushButton("")
+        changes_btn.setObjectName("cardLocalChanges")
+        changes_btn.setProperty("role", "cardLocalChanges")
+        changes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        changes_btn.setToolTip("Local working-tree changes — click to view")
+        changes_btn.setFlat(True)
+        changes_btn.hide()
+        _bump_font(changes_btn, 1, 12)
+        changes_btn.clicked.connect(
+            lambda _checked=False, p=path, n=display: open_repo_files_dialog(
+                p, n, RepoFilesDialog.MODE_LOCAL
+            )
+        )
+        foot.addWidget(changes_btn, 0, Qt.AlignmentFlag.AlignLeft)
+
         # Brief op toast (checkout/fetch feedback) — sits between status and stamp.
         status_label = styled_label("", "hint")
         status_label.setProperty("role", "cardStatus")
@@ -726,6 +746,10 @@ def build_view(icons, ctx=None) -> QWidget:
         groups_list.addItem(item)
         groups_list.setItemWidget(item, row)
         row.clicked.connect(lambda _checked=False, k=key: open_group(k))
+        row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        row.customContextMenuRequested.connect(
+            lambda pos, k=key, btn=row: show_group_context_menu(btn.mapToGlobal(pos), k)
+        )
 
     def known_groups(favorites: list) -> tuple[str, ...]:
         """Distinct non-empty group names, A–Z."""
@@ -1108,6 +1132,61 @@ def build_view(icons, ctx=None) -> QWidget:
         dialog.exec()
         refresh_favorites()
 
+    def show_group_context_menu(global_pos, key: str) -> None:
+        """Right-click on a left-rail group row: Rename (named groups) + Manage."""
+        menu = QMenu(root)
+        if key and key != "__demo__":
+            rename_act = menu.addAction("Rename group…")
+            rename_act.triggered.connect(lambda _c=False, k=key: rename_group_prompt(k))
+            menu.addSeparator()
+        manage_act = menu.addAction("Manage groups…")
+        manage_act.triggered.connect(manage_groups)
+        menu.popup(global_pos)
+
+    def rename_group_prompt(key: str) -> None:
+        """Ask for a new name and rename all favorites in that group."""
+        if favorites_repo is None or not key or key == "__demo__":
+            return
+        new_name, ok = QInputDialog.getText(
+            root,
+            "Rename group",
+            f"Rename “{key}” to:",
+            text=key,
+        )
+        if not ok:
+            return
+        error = rename_favorite_group(favorites_repo, key, new_name)
+        if error:
+            QMessageBox.warning(root, "Rename group", error)
+            return
+        new_name = new_name.strip()
+        if landing_state.get("group") == key:
+            landing_state["group"] = new_name
+            if service is not None:
+                try:
+                    service.set("git.home.group", new_name)
+                except Exception:  # noqa: BLE001
+                    pass
+        # Preserve last-refresh stamp under the new key when possible.
+        if key in last_refresh_map:
+            last_refresh_map[new_name] = last_refresh_map.pop(key)
+            _save_last_refresh_map()
+        refresh_favorites()
+
+    def open_repo_files_dialog(path: str, repo_name: str, mode: str) -> None:
+        """Open Local changes or Diff vs remote modal for one repository card."""
+        if not path or not os.path.isdir(path):
+            return
+        dialog = RepoFilesDialog(
+            root,
+            path=path,
+            repo_name=repo_name or os.path.basename(path.rstrip("/")) or path,
+            mode=mode,
+            git_executable=git_exe(),
+            pending_workers=status_workers,
+        )
+        dialog.exec()
+
     def show_card_menu(position) -> None:
         """Right-click menu on a repository card: group actions + Open / Edit / Remove.
 
@@ -1151,6 +1230,17 @@ def build_view(icons, ctx=None) -> QWidget:
         )
         if menu.actions():
             menu.addSeparator()
+        menu.addAction("Local changes…").triggered.connect(
+            lambda _checked=False, p=path: open_repo_files_dialog(
+                p, os.path.basename(p.rstrip("/")) or p, RepoFilesDialog.MODE_LOCAL
+            )
+        )
+        menu.addAction("Diff vs remote…").triggered.connect(
+            lambda _checked=False, p=path: open_repo_files_dialog(
+                p, os.path.basename(p.rstrip("/")) or p, RepoFilesDialog.MODE_REMOTE
+            )
+        )
+        menu.addSeparator()
         menu.addAction("Open").triggered.connect(
             lambda _checked=False, p=path: open_folder(p)
         )
@@ -2258,16 +2348,20 @@ def build_view(icons, ctx=None) -> QWidget:
         return "Clean"
 
     def _apply_remote_status(label, result: dict, path: str | None = None) -> None:
-        """Fill branch (top-right) + sync footer on the card."""
+        """Fill branch (top-right) + sync footer + local Changes chip on the card."""
         try:
             card = label
             while card is not None and card.objectName() != "repoCard":
                 card = card.parentWidget()
             branch_label = None
+            changes_btn = None
             if card is not None:
                 for child in card.findChildren(QLabel):
                     if child.property("role") == "cardBranch":
                         branch_label = child
+                for child in card.findChildren(QPushButton):
+                    if child.property("role") == "cardLocalChanges":
+                        changes_btn = child
                         break
 
             if not result.get("is_repo"):
@@ -2279,6 +2373,9 @@ def build_view(icons, ctx=None) -> QWidget:
                 if branch_label is not None:
                     branch_label.setText("—")
                     branch_label.setToolTip("")
+                if changes_btn is not None:
+                    changes_btn.hide()
+                    changes_btn.setText("")
                 return
 
             ahead = int(result.get("ahead") or 0)
@@ -2304,6 +2401,15 @@ def build_view(icons, ctx=None) -> QWidget:
                 branch_label.setText(
                     metrics.elidedText(branch, Qt.TextElideMode.ElideMiddle, 140)
                 )
+
+            if changes_btn is not None:
+                dirty = int(result.get("dirty_count") or 0)
+                if dirty > 0:
+                    changes_btn.setText(f"Changes · {dirty}")
+                    changes_btn.show()
+                else:
+                    changes_btn.setText("")
+                    changes_btn.hide()
         except RuntimeError:
             pass  # the card was rebuilt while the worker ran
 

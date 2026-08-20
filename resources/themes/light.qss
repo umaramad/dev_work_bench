@@ -218,6 +218,24 @@ QPushButton#groupRow { background: transparent; border: 1px solid #b8bfcc;
 QPushButton#groupRow:hover { background: #e8eaef; border-color: #8f99ab; }
 QPushButton#groupRow:checked { background: #ffffff;
     border: 1px solid #8f99ab; border-left: 3px solid #a87420; }
+QFrame#groupManagePanel, QFrame#groupManageEditor {
+    background: #ffffff; border: 1px solid #8f99ab; border-radius: 12px; }
+QListWidget#groupManageList {
+    background: transparent; border: none; outline: 0; }
+QListWidget#groupManageList::item {
+    margin: 2px 0; padding: 0; border: 1px solid #b8bfcc;
+    border-radius: 10px; background: #e8eaef; }
+QListWidget#groupManageList::item:hover {
+    border-color: #8f99ab; background: #dce0e8; }
+QListWidget#groupManageList::item:selected {
+    border-color: #2f6fdd; background: rgba(47, 111, 221, 0.16); }
+QWidget#groupManageRow { background: transparent; }
+QLabel#groupManageName {
+    color: #1a1f2a; font-weight: 600; font-size: 13px; }
+QLabel#groupManageBadge {
+    color: #5c6577; font-size: 11px; font-family: "SF Mono", Menlo, monospace;
+    background: #ffffff; border: 1px solid #b8bfcc; border-radius: 999px;
+    padding: 3px 8px; }
 QWidget#commandDeck { background: #ffffff; border: 1px solid #b8bfcc;
     border-radius: 8px; }
 QWidget#repoCard { background: #ffffff; border: 1px solid #b8bfcc;
@@ -259,6 +277,12 @@ QLabel#cardRemoteStatus[state="diverged"] { color: #c44545; }
 QLabel#cardRemoteStatus[state="none"] { color: #5c6577; }
 QLabel#cardRemoteStatus[state="warn"] { color: #a87420; }
 QLabel#cardRemoteStatus[state="err"] { color: #c44545; }
+QPushButton#cardLocalChanges {
+    background: rgba(196, 69, 69, 0.12); border: 1px solid rgba(196, 69, 69, 0.55);
+    border-radius: 8px; padding: 2px 8px; color: #a87420;
+    font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+QPushButton#cardLocalChanges:hover {
+    border-color: #a87420; color: #1a1f2a; }
 QLabel#cardUpdated { font-family: "SF Mono", Menlo, monospace;
     font-size: 11px; color: #5c6577; }
 QLabel[role="cardStatus"] { font-family: "SF Mono", Menlo, monospace; }

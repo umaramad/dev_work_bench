@@ -14,7 +14,10 @@ Operations:
     log         — recent commits as rows (hash/author/date/message)
     find_repos  — every git repo nested under ``path`` (workspaces)
     fetch_all   — run fetch in each nested repo (progress per repo)
-    remote_status — branch + ahead/behind vs the upstream (local-only)
+    remote_status — branch + ahead/behind vs the upstream (local-only);
+                    also returns dirty_count from the same porcelain parse
+    working_tree_status — porcelain file list (local changes vs HEAD)
+    diff_vs_upstream — name-status vs @{upstream} (or origin/<branch>)
     reset       — ``git reset`` (soft; ``hard=True`` → ``--hard``)
     has_branch  — does local ``refs/heads/<name>`` exist? (name in args[0])
     checkout    — ``git checkout <name>``; force and/or from remote tip
@@ -51,11 +54,85 @@ _TIME_OUTPUT = {  # seconds per operation class
     "find_repos": 30,
     "fetch_all": 120,
     "remote_status": 30,
+    "working_tree_status": 30,
+    "diff_vs_upstream": 45,
     "reset": 60,
     "has_branch": 15,
     "checkout": 30,
     "run_cmd": 120,
 }
+
+
+def _porcelain_label(code: str) -> str:
+    """Map a 2-char porcelain XY code to a short display label."""
+    code = (code + "  ")[:2]
+    if code == "??":
+        return "untracked"
+    if "U" in code or code in ("DD", "AA", "AU", "UA", "DU", "UD"):
+        return "conflict"
+    index, work = code[0], code[1]
+    if index == "A" or work == "A":
+        return "added"
+    if index == "D" or work == "D":
+        return "deleted"
+    if index == "R" or work == "R":
+        return "renamed"
+    if index == "C" or work == "C":
+        return "copied"
+    if index == "M" or work == "M":
+        return "modified"
+    return code.strip() or "changed"
+
+
+def parse_porcelain_status(output: str) -> list[dict]:
+    """Parse ``git status --porcelain=v1`` / ``--short`` body lines into file rows."""
+    files: list[dict] = []
+    seen: set[str] = set()
+    for raw in (output or "").splitlines():
+        line = raw.rstrip("\n")
+        if not line or line.startswith("##"):
+            continue
+        if len(line) < 2:
+            continue
+        code = line[:2]
+        rest = line[3:] if len(line) > 2 and line[2] == " " else line[2:].lstrip()
+        path = rest
+        if " -> " in rest:
+            path = rest.split(" -> ", 1)[-1].strip()
+        path = path.strip().strip('"')
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        files.append({"code": code, "status": _porcelain_label(code), "path": path})
+    return files
+
+
+def parse_name_status(output: str) -> list[dict]:
+    """Parse ``git diff --name-status`` lines into file rows."""
+    files: list[dict] = []
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        code = parts[0].strip()
+        letter = code[:1] if code else "?"
+        path = parts[-1].strip()
+        label = {
+            "M": "modified",
+            "A": "added",
+            "D": "deleted",
+            "R": "renamed",
+            "C": "copied",
+            "T": "typechange",
+            "U": "unmerged",
+        }.get(letter, code or "changed")
+        if not path:
+            continue
+        files.append({"code": letter, "status": label, "path": path})
+    return files
 
 
 class GitWorker(Worker):
@@ -100,6 +177,10 @@ class GitWorker(Worker):
             return self._fetch_all()
         if op == "remote_status":
             return self._remote_status()
+        if op == "working_tree_status":
+            return self._working_tree_status()
+        if op == "diff_vs_upstream":
+            return self._diff_vs_upstream()
         if op == "reset":
             # args: () soft reset; ("hard",) hard HEAD; ("hard", "origin/main") hard to ref
             if self._args and self._args[0] == "hard":
@@ -240,7 +321,14 @@ class GitWorker(Worker):
         """
         status = self._git(("status", "--short", "--branch"))
         if not status["ok"]:
-            return {"is_repo": False, "branch": "", "ahead": 0, "behind": 0, "upstream": None}
+            return {
+                "is_repo": False,
+                "branch": "",
+                "ahead": 0,
+                "behind": 0,
+                "upstream": None,
+                "dirty_count": 0,
+            }
         branch = ""
         ahead = 0
         behind = 0
@@ -274,13 +362,88 @@ class GitWorker(Worker):
                 elif piece.startswith("behind "):
                     behind = int(piece.split(" ", 1)[1])
             break
+        files = parse_porcelain_status(status["output"])
         return {
             "is_repo": True,
             "branch": branch,
             "ahead": ahead,
             "behind": behind,
             "upstream": upstream,
+            "dirty_count": len(files),
         }
+
+    def _working_tree_status(self) -> dict:
+        """Working-tree file list (``git status --porcelain=v1``)."""
+        check = self._git(("rev-parse", "--is-inside-work-tree"))
+        if not check["ok"]:
+            return {"ok": False, "files": [], "count": 0, "error": "Not a git repository"}
+        result = self._git(("status", "--porcelain=v1"))
+        if not result["ok"]:
+            return {
+                "ok": False,
+                "files": [],
+                "count": 0,
+                "error": result["output"] or "git status failed",
+            }
+        files = parse_porcelain_status(result["output"])
+        return {"ok": True, "files": files, "count": len(files), "error": None}
+
+    def _diff_vs_upstream(self) -> dict:
+        """Committed differences vs upstream (``git diff --name-status A...B``).
+
+        Does not auto-fetch. Uncommitted changes are reported only as
+        ``dirty_hint_count`` so Local changes stays the place for the working tree.
+        """
+        check = self._git(("rev-parse", "--is-inside-work-tree"))
+        if not check["ok"]:
+            return {
+                "ok": False,
+                "upstream": None,
+                "files": [],
+                "dirty_hint_count": 0,
+                "error": "Not a git repository",
+            }
+        upstream, err = self._resolve_upstream()
+        if not upstream:
+            return {
+                "ok": False,
+                "upstream": None,
+                "files": [],
+                "dirty_hint_count": 0,
+                "error": err or "No upstream configured — fetch or set upstream first.",
+            }
+        diff = self._git(("diff", "--name-status", f"{upstream}...HEAD"))
+        if not diff["ok"]:
+            return {
+                "ok": False,
+                "upstream": upstream,
+                "files": [],
+                "dirty_hint_count": 0,
+                "error": diff["output"] or f"Could not diff against {upstream}",
+            }
+        files = parse_name_status(diff["output"])
+        dirty = parse_porcelain_status(self._git(("status", "--porcelain=v1"))["output"])
+        return {
+            "ok": True,
+            "upstream": upstream,
+            "files": files,
+            "dirty_hint_count": len(dirty),
+            "error": None,
+        }
+
+    def _resolve_upstream(self) -> tuple[str | None, str | None]:
+        """Return (upstream_ref, error). Prefers @{upstream}, then origin/<branch>."""
+        up = self._git(("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"))
+        if up["ok"] and up["output"].strip():
+            return up["output"].strip(), None
+        branch = self._git(("rev-parse", "--abbrev-ref", "HEAD"))["output"].strip()
+        if not branch or branch == "HEAD":
+            return None, "Detached HEAD — no upstream to compare."
+        remote_ref = f"origin/{branch}"
+        exists = self._git(("show-ref", "--verify", "--quiet", f"refs/remotes/{remote_ref}"))
+        if exists["ok"]:
+            return remote_ref, None
+        return None, "No upstream configured — fetch or set upstream first."
 
     # -- plumbing -------------------------------------------------------------------
 
