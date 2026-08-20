@@ -221,27 +221,36 @@ class RepoDialog(QDialog):
             self.path_edit.setText(chosen)
 
 
+def group_display_name(group: str | None) -> str:
+    """User-facing label: empty group key is Ungrouped."""
+    return (group or "").strip() or "Ungrouped"
+
+
 def rename_favorite_group(favorites_repo, old_name: str, new_name: str) -> str | None:
     """Rename a group across all folder favorites.
+
+    An empty ``old_name`` is Ungrouped. Renaming it assigns those repositories
+    a group name; if that name already exists they are merged into it.
 
     Returns an error message, or ``None`` on success.
     """
     old = (old_name or "").strip()
     new = (new_name or "").strip()
-    if not old:
-        return "Ungrouped cannot be renamed."
     if not new:
         return "A group name is required."
     if new == old:
         return "That is the current name — nothing to rename."
-    counts: dict[str, int] = {}
+    named: dict[str, str] = {}
     for favorite in favorites_repo.by_kind("folder", limit=None):
         group = (favorite.group_name or "").strip()
         if group:
-            counts[group] = counts.get(group, 0) + 1
-    other_names = {g.casefold() for g in counts if g != old}
-    if new.casefold() in other_names:
-        return f"A group named “{new}” already exists — use Merge instead."
+            named.setdefault(group.casefold(), group)
+    collision = named.get(new.casefold())
+    if collision is not None and collision != old:
+        if old:
+            return f"A group named “{collision}” already exists — use Merge instead."
+        # Ungrouped → existing group: move into the canonical spelling.
+        new = collision
     for favorite in favorites_repo.by_kind("folder", limit=None):
         if (favorite.group_name or "").strip() == old:
             favorite.group_name = new
@@ -279,8 +288,8 @@ class GroupManagerDialog(QDialog):
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         intro = QLabel(
-            "Rename a group, merge two groups, or delete a group — "
-            "its repositories move to Ungrouped."
+            "Rename a group (including Ungrouped), merge two groups, or delete "
+            "a group — its repositories move to Ungrouped."
         )
         intro.setObjectName("hint")
         intro.setWordWrap(True)
@@ -422,7 +431,7 @@ class GroupManagerDialog(QDialog):
     # -- data ------------------------------------------------------------------
 
     def _group_counts(self) -> dict[str, int]:
-        """group name -> number of repositories in it (non-empty groups).
+        """group name -> number of repositories in it, including Ungrouped ("").
 
         Fetches *all* favorites (no cap) so groups on older repositories are
         still manageable even when the landing page limits its list.
@@ -430,8 +439,7 @@ class GroupManagerDialog(QDialog):
         counts: dict[str, int] = {}
         for favorite in self._repo.by_kind("folder", limit=None):
             group = (favorite.group_name or "").strip()
-            if group:
-                counts[group] = counts.get(group, 0) + 1
+            counts[group] = counts.get(group, 0) + 1
         return counts
 
     def _current_group(self) -> str | None:
@@ -443,7 +451,7 @@ class GroupManagerDialog(QDialog):
         selected = self._current_group()
         counts = self._group_counts()
         self.group_list.clear()
-        for group in sorted(counts, key=str.casefold):
+        for group in sorted(counts, key=lambda g: (g == "", g.casefold())):
             count = counts[group]
             noun = "repo" if count == 1 else "repos"
             item = QListWidgetItem()
@@ -456,7 +464,7 @@ class GroupManagerDialog(QDialog):
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(12, 8, 12, 8)
             row_layout.setSpacing(10)
-            name_label = QLabel(group)
+            name_label = QLabel(group_display_name(group))
             name_label.setObjectName("groupManageName")
             name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             row_layout.addWidget(name_label, 1)
@@ -479,10 +487,13 @@ class GroupManagerDialog(QDialog):
     # -- panels / actions --------------------------------------------------------
 
     def _sync_actions(self) -> None:
-        has_selection = self._current_group() is not None
+        group = self._current_group()
+        has_selection = group is not None
+        is_ungrouped = has_selection and group == ""
+        named_others = [name for name in self._group_counts() if name and name != group]
         self.rename_button.setEnabled(has_selection)
-        self.merge_button.setEnabled(has_selection)
-        self.delete_button.setEnabled(has_selection)
+        self.merge_button.setEnabled(has_selection and bool(named_others))
+        self.delete_button.setEnabled(has_selection and not is_ungrouped)
         if not has_selection:
             self._hide_editor()
             self._set_hint("")
@@ -505,6 +516,9 @@ class GroupManagerDialog(QDialog):
         group = self._current_group()
         if group is None:
             return
+        self.rename_edit.setPlaceholderText(
+            "New group name" if group else "Type a group name, or an existing one"
+        )
         self.rename_edit.setText(group)
         self.rename_edit.selectAll()
         self.rename_edit.setFocus()
@@ -516,7 +530,10 @@ class GroupManagerDialog(QDialog):
         if group is None:
             return
         self.merge_combo.clear()
-        for other in sorted((g for g in self._group_counts() if g != group), key=str.casefold):
+        for other in sorted(
+            (g for g in self._group_counts() if g and g != group),
+            key=str.casefold,
+        ):
             self.merge_combo.addItem(other, other)
         if self.merge_combo.count() == 0:
             self._error("There is no other group to merge into.")
@@ -526,11 +543,13 @@ class GroupManagerDialog(QDialog):
 
     def _show_delete(self) -> None:
         group = self._current_group()
-        if group is None:
+        if group is None or group == "":
             return
         count = self._group_counts().get(group, 0)
         noun = "repository" if count == 1 else "repositories"
-        self.delete_label.setText(f"Move {count} {noun} from “{group}” to Ungrouped?")
+        self.delete_label.setText(
+            f"Move {count} {noun} from “{group_display_name(group)}” to Ungrouped?"
+        )
         self._set_hint("")
         self._editor.setCurrentIndex(3)
 
@@ -545,37 +564,43 @@ class GroupManagerDialog(QDialog):
             return
         self._hide_editor()
         self._reload_groups()
-        # Select the renamed group if it still exists.
+        # Select the renamed group if it still exists (canonical case after merge).
+        wanted = new_name.strip().casefold()
         for i in range(self.group_list.count()):
-            if self.group_list.item(i).data(Qt.ItemDataRole.UserRole) == new_name:
+            value = self.group_list.item(i).data(Qt.ItemDataRole.UserRole)
+            if str(value or "").casefold() == wanted:
                 self.group_list.setCurrentRow(i)
                 break
-        self._set_hint(f"Renamed “{group}” to “{new_name}”.")
+        self._set_hint(
+            f"Renamed “{group_display_name(group)}” to “{new_name.strip()}”."
+        )
 
     def _apply_merge(self) -> None:
         source = self._current_group()
         target = self.merge_combo.currentData()
-        if not source or not target:
+        if source is None or not target:
             return
-        for favorite in self._repo.by_kind("folder"):
+        for favorite in self._repo.by_kind("folder", limit=None):
             if (favorite.group_name or "").strip() == source:
                 favorite.group_name = target
                 self._repo.update(favorite)
         self._hide_editor()
         self._reload_groups()
-        self._set_hint(f"Merged “{source}” into “{target}”.")
+        self._set_hint(
+            f"Merged “{group_display_name(source)}” into “{target}”."
+        )
 
     def _apply_delete(self) -> None:
         group = self._current_group()
         if group is None:
             return
-        for favorite in self._repo.by_kind("folder"):
+        for favorite in self._repo.by_kind("folder", limit=None):
             if (favorite.group_name or "").strip() == group:
                 favorite.group_name = ""
                 self._repo.update(favorite)
         self._hide_editor()
         self._reload_groups()
-        self._set_hint(f"Moved “{group}” to Ungrouped.")
+        self._set_hint(f"Moved “{group_display_name(group)}” to Ungrouped.")
 
 
 class ScanReposDialog(QDialog):

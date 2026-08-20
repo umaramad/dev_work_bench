@@ -7,9 +7,6 @@ __pycache__/
 .ruff_cache/
 .freebuff/
 docs/
-docs/superpowers/
-docs/superpowers/specs/2026-08-14-git-landing-branches-design.md
-docs/superpowers/specs/2026-08-15-maven-deps-in-git-tab-design.md
 # Build artifacts
 dist/
 build/

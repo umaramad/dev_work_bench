@@ -898,7 +898,7 @@ def build_view(icons, ctx=None) -> QWidget:
                 return
 
             favorites = favorites_repo.by_kind("folder")
-            manage_button.setEnabled(bool(known_groups(favorites)))
+            manage_button.setEnabled(bool(favorites))
             counts = section_counts()
             if not counts:
                 groups_empty.setText(
@@ -1133,9 +1133,9 @@ def build_view(icons, ctx=None) -> QWidget:
         refresh_favorites()
 
     def show_group_context_menu(global_pos, key: str) -> None:
-        """Right-click on a left-rail group row: Rename (named groups) + Manage."""
+        """Right-click on a left-rail group row: Rename (incl. Ungrouped) + Manage."""
         menu = QMenu(root)
-        if key and key != "__demo__":
+        if key != "__demo__":
             rename_act = menu.addAction("Rename group…")
             rename_act.triggered.connect(lambda _c=False, k=key: rename_group_prompt(k))
             menu.addSeparator()
@@ -1145,12 +1145,13 @@ def build_view(icons, ctx=None) -> QWidget:
 
     def rename_group_prompt(key: str) -> None:
         """Ask for a new name and rename all favorites in that group."""
-        if favorites_repo is None or not key or key == "__demo__":
+        if favorites_repo is None or key == "__demo__":
             return
+        display = key or "Ungrouped"
         new_name, ok = QInputDialog.getText(
             root,
             "Rename group",
-            f"Rename “{key}” to:",
+            f"Rename “{display}” to:",
             text=key,
         )
         if not ok:
