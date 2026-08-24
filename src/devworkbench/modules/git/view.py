@@ -64,6 +64,7 @@ from devworkbench.modules.git.dialog import (
     rename_favorite_group,
 )
 from devworkbench.modules.git.maven_deps import build_maven_deps_pane
+from devworkbench.modules.git.maven_tree import build_maven_tree_pane
 from devworkbench.services.configuration_service import TOPIC_GIT_OPEN_GROUP
 from devworkbench.ui.samples import GIT_REPOS
 from devworkbench.ui.theme import current_colors
@@ -2698,6 +2699,14 @@ def build_view(icons, ctx=None) -> QWidget:
             events=events,
         )
         repo_inner.addTab(deps_pane, "Dependencies")
+
+        tree_pane = build_maven_tree_pane(
+            repo_path=path,
+            pending_workers=pending,
+            is_closed=lambda: bool(getattr(page, "closed", False)),
+            git_executable=git_exe,
+        )
+        repo_inner.addTab(tree_pane, "Tree")
 
         def _on_repo_inner_changed(index: int) -> None:
             if index == 1 and hasattr(deps_pane, "ensure_scanned"):

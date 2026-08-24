@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 
 from devworkbench.workers.base import Worker
@@ -1249,3 +1250,168 @@ class MavenCompareWorker(Worker):
             "count_a": len(scan_a.get("dependencies") or []),
             "count_b": len(scan_b.get("dependencies") or []),
         }
+
+
+# ---------------------------------------------------------------------------
+# Maven dependency tree (transitive)
+# ---------------------------------------------------------------------------
+
+# Matches lines like:  +- org.springframework.boot:spring-boot:jar:3.2.1:compile
+# or:                 |  \- org.slf4j:slf4j-api:jar:2.0.9:compile
+# or:                 (omitted for conflict with 3.2.1)
+_TREE_DEP_RE = re.compile(
+    r"^\[INFO\]\s+([|\\s+\-]+)\s+"
+    r"(\S+?):(\S+?):(\S+?):(\S+?)(?::(\S+))?"
+    r"(?:\s+(\(omitted.*\)))?"
+)
+_TREE_OMITTED_RE = re.compile(
+    r"^\[INFO\]\s+([|\\s+\-]+)\s+\(omitted(.*)\)"
+)
+
+
+def _parse_tree_output(output: str) -> list[dict]:
+    """Parse ``mvn dependency:tree`` text output into a nested node list.
+
+    Returns a list of root-level tree nodes.  Each node is::
+
+        {
+            "group_id": str,
+            "artifact_id": str,
+            "version": str,
+            "scope": str,        # compile, test, provided, …
+            "omitted": bool,
+            "omitted_reason": str,
+            "children": [...],
+        }
+    """
+    root_nodes: list[dict] = []
+    # Stack tracks (indent_level, parent_list) for building the hierarchy.
+    stack: list[tuple[int, list[dict]]] = [(-1, root_nodes)]
+    last_node: dict | None = None
+
+    for line in output.splitlines():
+        if not line.startswith("[INFO]"):
+            continue
+
+        # Check for omitted-only line (no GAV, just reason)
+        omit_match = _TREE_OMITTED_RE.match(line)
+        if omit_match and last_node is not None:
+            reason = (omit_match.group(2) or "").strip().rstrip(")")
+            last_node["omitted"] = True
+            last_node["omitted_reason"] = f"omitted{reason}"
+            continue
+
+        dep_match = _TREE_DEP_RE.match(line)
+        if not dep_match:
+            continue
+
+        prefix = dep_match.group(1)
+        group_id = dep_match.group(2)
+        artifact_id = dep_match.group(3)
+        _packaging = dep_match.group(4)  # jar, pom, etc. — not displayed
+        version = dep_match.group(5)
+        scope = dep_match.group(6) or "compile"
+        omitted_hint = (dep_match.group(7) or "").strip()
+
+        # Compute depth from prefix: each "|  " or "   " segment = +1,
+        # each "+- " or "\- " = +1.  Simplified: count non-space, non-| chars.
+        depth = 0
+        for ch in prefix:
+            if ch in ("+", "\\"):
+                depth += 1
+
+        node: dict = {
+            "group_id": group_id,
+            "artifact_id": artifact_id,
+            "version": version or "",
+            "scope": scope,
+            "omitted": bool(omitted_hint),
+            "omitted_reason": omitted_hint.rstrip(")") if omitted_hint else "",
+            "children": [],
+        }
+        last_node = node
+
+        # Walk stack to find the right parent.
+        while len(stack) > 1 and stack[-1][0] >= depth:
+            stack.pop()
+        stack[-1][1].append(node)
+        stack.append((depth, node["children"]))
+
+    return root_nodes
+
+
+def resolve_maven_tree(
+    repo_path: str, *, verbose: bool = False, executable: str = "mvn"
+) -> dict:
+    """Run ``mvn dependency:tree`` and return structured output."""
+    cmd = [executable, "dependency:tree", "-DoutputType=text"]
+    if verbose:
+        cmd.append("-Dverbose")
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        return {
+            "tree": [],
+            "total_deps": 0,
+            "omitted_deps": 0,
+            "mvn_error": "Maven not found. Install Maven and ensure it's on PATH.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "tree": [],
+            "total_deps": 0,
+            "omitted_deps": 0,
+            "mvn_error": "Maven command timed out after 120s.",
+        }
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "Maven failed").strip()
+        # Truncate very long errors
+        if len(err) > 500:
+            err = err[:500] + "..."
+        return {
+            "tree": [],
+            "total_deps": 0,
+            "omitted_deps": 0,
+            "mvn_error": err,
+        }
+
+    tree = _parse_tree_output(proc.stdout or "")
+
+    def _count(nodes: list[dict]) -> tuple[int, int]:
+        total = 0
+        omitted = 0
+        for n in nodes:
+            total += 1
+            if n.get("omitted"):
+                omitted += 1
+            t, o = _count(n.get("children") or [])
+            total += t
+            omitted += o
+        return total, omitted
+
+    total, omitted = _count(tree)
+    return {
+        "tree": tree,
+        "total_deps": total,
+        "omitted_deps": omitted,
+        "mvn_error": "",
+    }
+
+
+class MavenTreeWorker(Worker):
+    """Run ``mvn dependency:tree`` for a local repo."""
+
+    def __init__(self, path: str, *, verbose: bool = False) -> None:
+        super().__init__()
+        self._path = path
+        self._verbose = verbose
+
+    def work(self):
+        return resolve_maven_tree(self._path, verbose=self._verbose)
