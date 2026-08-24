@@ -604,6 +604,17 @@ class ComparePage(SettingsPage):
     )
 
 
+class MavenPage(SettingsPage):
+    page_id = "maven"
+    title = "Maven"
+    icon = "maven"
+    subtitle = "Executable and dependency tree options"
+    groups = (
+        ("Core", ("maven.executable",)),
+        ("Tree", ("maven.auto_resolve_tree",)),
+    )
+
+
 class LogsPage(SettingsPage):
     page_id = "logs"
     title = "Logs"
@@ -715,6 +726,7 @@ PAGES: list[type[SettingsPage]] = [
     AIPage,
     SSHPage,
     ComparePage,
+    MavenPage,
     LogsPage,
     PluginsPage,
     AdvancedPage,

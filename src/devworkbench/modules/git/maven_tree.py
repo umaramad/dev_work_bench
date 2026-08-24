@@ -35,6 +35,7 @@ def build_maven_tree_pane(
     pending_workers: list,
     is_closed: Callable[[], bool],
     git_executable: Callable[[], str] | None = None,
+    config_service=None,
 ) -> QWidget:
     """Build the Tree view for one opened repository."""
     root = QWidget()
@@ -66,6 +67,14 @@ def build_maven_tree_pane(
     verbose_btn.setCheckable(True)
     verbose_btn.setToolTip("Show omitted/conflict dependencies (re-runs mvn)")
     toolbar_layout.addWidget(verbose_btn)
+
+    def _maven_exe() -> str:
+        if config_service is None:
+            return "mvn"
+        try:
+            return str(config_service.get("maven.executable") or "mvn")
+        except Exception:  # noqa: BLE001
+            return "mvn"
 
     resolve_btn = button("Resolve tree", "primary")
     resolve_btn.setObjectName("mavenTreeResolve")
@@ -209,7 +218,7 @@ def build_maven_tree_pane(
         state["busy"] = True
         _set_enabled(False)
         status.setText("Resolving dependency tree…")
-        worker = MavenTreeWorker(repo_path, verbose=state["verbose"])
+        worker = MavenTreeWorker(repo_path, verbose=state["verbose"], executable=_maven_exe())
         pending_workers.append(worker)
 
         def done(result, current=worker) -> None:

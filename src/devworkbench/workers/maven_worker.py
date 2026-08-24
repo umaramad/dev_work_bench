@@ -1408,10 +1408,15 @@ def resolve_maven_tree(
 class MavenTreeWorker(Worker):
     """Run ``mvn dependency:tree`` for a local repo."""
 
-    def __init__(self, path: str, *, verbose: bool = False) -> None:
+    def __init__(
+        self, path: str, *, verbose: bool = False, executable: str = "mvn"
+    ) -> None:
         super().__init__()
         self._path = path
         self._verbose = verbose
+        self._executable = executable
 
     def work(self):
-        return resolve_maven_tree(self._path, verbose=self._verbose)
+        return resolve_maven_tree(
+            self._path, verbose=self._verbose, executable=self._executable
+        )

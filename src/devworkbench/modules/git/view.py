@@ -2705,6 +2705,7 @@ def build_view(icons, ctx=None) -> QWidget:
             pending_workers=pending,
             is_closed=lambda: bool(getattr(page, "closed", False)),
             git_executable=git_exe,
+            config_service=service,
         )
         repo_inner.addTab(tree_pane, "Tree")
 

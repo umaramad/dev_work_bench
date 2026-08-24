@@ -297,6 +297,14 @@ SCHEMA: list[SettingDef] = [
              default=".git,.idea,target,build,node_modules",
              hint="Comma-separated directory names pruned from folder comparisons"),
     ),
+    # ------------------------------------------------------------------ Maven
+    *_defs(
+        "Maven",
+        dict(key="maven.executable", label="Maven executable", kind=SettingKind.STRING, default="mvn",
+             hint="Path to the mvn binary (e.g. /usr/bin/mvn or mvn)", validator=_non_empty),
+        dict(key="maven.auto_resolve_tree", label="Auto-resolve tree on tab switch", kind=SettingKind.BOOL, default=False,
+             hint="Run mvn dependency:tree automatically when the Tree tab is opened"),
+    ),
     # ------------------------------------------------------------------- Logs
     *_defs(
         "Logs",
@@ -333,7 +341,7 @@ SCHEMA: list[SettingDef] = [
 
 BY_KEY: dict[str, SettingDef] = {definition.key: definition for definition in SCHEMA}
 CATEGORIES: list[str] = [
-    "General", "Menus", "Appearance", "Git", "AI", "SSH", "Compare", "Logs", "Plugins", "Advanced",
+    "General", "Menus", "Appearance", "Git", "AI", "SSH", "Compare", "Maven", "Logs", "Plugins", "Advanced",
 ]
 DEFAULTS: dict[str, Any] = {definition.key: definition.default for definition in SCHEMA}
 
