@@ -97,6 +97,63 @@ def _parse_dependencies_block(root: ET.Element, *, managed: bool) -> list[dict]:
     return deps
 
 
+def _parse_profile_dependencies(root: ET.Element) -> list[dict]:
+    """Collect dependencies declared inside ``<profiles>/<profile>/<dependencies>``.`
+
+    Profile dependencies are conditional in Maven (only active when the profile
+    is activated), but they are still *declared* in the pom.xml and should be
+    visible in a dependency scan so the report is complete.
+    """
+    deps: list[dict] = []
+    profiles = _find_child(root, "profiles")
+    if profiles is None:
+        return deps
+    for profile in list(profiles):
+        if _tag_name(profile.tag) != "profile":
+            continue
+        profile_id = _child_text(profile, "id", "")
+        container = _find_child(profile, "dependencies")
+        if container is None:
+            continue
+        for child in list(container):
+            if _tag_name(child.tag) != "dependency":
+                continue
+            row = _parse_dependency(child, managed=False)
+            if row:
+                row["profile"] = profile_id
+                deps.append(row)
+    return deps
+
+
+def _parse_profile_managed_dependencies(root: ET.Element) -> list[dict]:
+    """Collect ``<dependencyManagement>`` entries from inside ``<profiles>``.
+
+    Managed versions declared in profiles (e.g. a ``dev`` profile that pins
+    extra test-library versions) need to be available for version resolution
+    just like root-level ``<dependencyManagement>``.
+    """
+    deps: list[dict] = []
+    profiles = _find_child(root, "profiles")
+    if profiles is None:
+        return deps
+    for profile in list(profiles):
+        if _tag_name(profile.tag) != "profile":
+            continue
+        profile_id = _child_text(profile, "id", "")
+        dep_mgmt = _find_child(profile, "dependencyManagement")
+        container = _find_child(dep_mgmt, "dependencies") if dep_mgmt is not None else None
+        if container is None:
+            continue
+        for child in list(container):
+            if _tag_name(child.tag) != "dependency":
+                continue
+            row = _parse_dependency(child, managed=True)
+            if row:
+                row["profile"] = profile_id
+                deps.append(row)
+    return deps
+
+
 def parse_pom_file(pom_path: str) -> dict:
     """Parse one pom.xml → module metadata, properties, and declared deps."""
     tree = ET.parse(pom_path)
@@ -141,6 +198,8 @@ def parse_pom_file(pom_path: str) -> dict:
         "parent": parent_info,
         "dependencies": _parse_dependencies_block(root, managed=False),
         "managed_dependencies": _parse_dependencies_block(root, managed=True),
+        "profile_dependencies": _parse_profile_dependencies(root),
+        "profile_managed_dependencies": _parse_profile_managed_dependencies(root),
     }
 
 
@@ -248,7 +307,11 @@ def _effective_properties(pom_path: str, by_path: dict[str, dict], by_ga: dict[t
 def _effective_managed_versions(
     pom_path: str, by_path: dict[str, dict], by_ga: dict[tuple, str], props: dict[str, str]
 ) -> dict[tuple[str, str], str]:
-    """GAV version map from dependencyManagement along the parent chain."""
+    """GAV version map from dependencyManagement along the parent chain.
+
+    Covers both root-level ``<dependencyManagement>`` and profile-scoped
+    ``<dependencyManagement>`` entries from ancestor poms.
+    """
     managed: dict[tuple[str, str], str] = {}
     for path in _ancestor_chain(pom_path, by_path, by_ga):
         meta = by_path.get(path) or {}
@@ -259,7 +322,59 @@ def _effective_managed_versions(
             ver = resolve_properties(dep.get("version") or "", path_props)
             if gid and aid and ver:
                 managed[(gid, aid)] = ver
+        for dep in meta.get("profile_managed_dependencies") or []:
+            gid = resolve_properties(dep.get("group_id") or "", path_props)
+            aid = resolve_properties(dep.get("artifact_id") or "", path_props)
+            ver = resolve_properties(dep.get("version") or "", path_props)
+            if gid and aid and ver:
+                managed[(gid, aid)] = ver
     return managed
+
+
+def _inherited_dependencies(
+    pom_path: str, by_path: dict[str, dict], by_ga: dict[tuple, str]
+) -> list[dict]:
+    """Collect direct ``<dependencies>`` inherited from ancestor poms.
+
+    In Maven, every dependency declared in a parent's ``<dependencies>`` block
+    is automatically inherited by all child modules (unless the child
+    re-declares the same groupId:artifactId, which overrides the parent's
+    version/scope/type).  This function walks the ancestor chain root-first
+    and returns the de-duplicated set of inherited dependencies.
+    """
+    chain = _ancestor_chain(pom_path, by_path, by_ga)
+    # Root-first iteration so closer-parent wins over grandparent.
+    inherited: dict[tuple[str, str], dict] = {}
+    for path in chain:
+        if path == pom_path:
+            continue  # skip self — own deps handled separately
+        meta = by_path.get(path) or {}
+        for dep in meta.get("dependencies") or []:
+            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            if key[0] and key[1]:
+                inherited[key] = dep
+    return list(inherited.values())
+
+
+def _inherited_profile_dependencies(
+    pom_path: str, by_path: dict[str, dict], by_ga: dict[tuple, str]
+) -> list[dict]:
+    """Collect profile ``<dependencies>`` inherited from ancestor poms.
+
+    Same inheritance rules as :func:`_inherited_dependencies` but for
+    dependencies declared inside ``<profiles>/<profile>/<dependencies>``.
+    """
+    chain = _ancestor_chain(pom_path, by_path, by_ga)
+    inherited: dict[tuple[str, str], dict] = {}
+    for path in chain:
+        if path == pom_path:
+            continue
+        meta = by_path.get(path) or {}
+        for dep in meta.get("profile_dependencies") or []:
+            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            if key[0] and key[1]:
+                inherited[key] = dep
+    return list(inherited.values())
 
 
 def _collect_poms_via_modules(root_pom: str) -> list[str]:
@@ -374,7 +489,34 @@ def scan_declared_dependencies(repo_path: str) -> dict:
             }
         )
 
-        declared = list(meta.get("dependencies") or [])
+        # --- Merge own + inherited dependencies -----------------------------------
+        # In Maven, parent <dependencies> are automatically inherited by every
+        # child module.  A child re-declaring the same GAV overrides the parent.
+        own_deps = meta.get("dependencies") or []
+        own_profile_deps = meta.get("profile_dependencies") or []
+        inherited = _inherited_dependencies(abs_pom, by_path, by_ga)
+        inherited_profile = _inherited_profile_dependencies(abs_pom, by_path, by_ga)
+
+        # Build merged map: inherited first, own overrides, profile fills gaps.
+        dep_map: dict[tuple[str, str], dict] = {}
+        for dep in inherited:
+            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            if key[0] and key[1]:
+                dep_map[key] = dep
+        for dep in own_deps:
+            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            if key[0] and key[1]:
+                dep_map[key] = dep  # child overrides parent
+        for dep in inherited_profile:
+            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            if key[0] and key[1] and key not in dep_map:
+                dep_map[key] = dep  # profile fills gaps only
+        for dep in own_profile_deps:
+            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            if key[0] and key[1] and key not in dep_map:
+                dep_map[key] = dep
+
+        declared: list[dict] = list(dep_map.values())
         # Include managed-only entries from this pom as managed rows.
         declared.extend(meta.get("managed_dependencies") or [])
 
@@ -396,6 +538,7 @@ def scan_declared_dependencies(repo_path: str) -> dict:
                     "type": dep_type,
                     "pom_path": abs_pom,
                     "managed": bool(dep.get("managed")),
+                    "profile": dep.get("profile") or "",
                 }
             )
 
@@ -442,6 +585,7 @@ def dependencies_to_html(
         "scope": str((initial_filters or {}).get("scope") or ""),
         "conflicts": bool((initial_filters or {}).get("conflicts")),
         "module": str((initial_filters or {}).get("module") or ""),
+        "profile": str((initial_filters or {}).get("profile") or ""),
     }
     filters_json = json.dumps(filters, ensure_ascii=False)
 
@@ -464,6 +608,16 @@ def dependencies_to_html(
         selected = " selected" if scope == filters["scope"] else ""
         scope_options.append(f'<option value="{esc(scope)}"{selected}>{esc(label)}</option>')
 
+    profile_values = sorted(
+        {str(row.get("profile") or "").strip() for row in rows}
+    )
+    profile_options = ['<option value="">All profiles</option>', '<option value="__direct__">direct</option>']
+    for prof in profile_values:
+        if not prof:
+            continue
+        selected = " selected" if prof == filters["profile"] else ""
+        profile_options.append(f'<option value="{esc(prof)}"{selected}>{esc(prof)}</option>')
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     body_rows = []
     for row in rows:
@@ -474,6 +628,7 @@ def dependencies_to_html(
         version = str(row.get("version") or "")
         scope = str(row.get("scope") or "")
         module = str(row.get("module_id") or "")
+        profile = str(row.get("profile") or "")
         cls = ' class="conflict"' if conflict else ""
         body_rows.append(
             f"<tr{cls}"
@@ -482,6 +637,7 @@ def dependencies_to_html(
             f' data-version="{esc(version)}"'
             f' data-scope="{esc(scope or "compile")}"'
             f' data-module="{esc(module)}"'
+            f' data-profile="{esc(profile)}"'
             f' data-conflict="{"1" if conflict else "0"}"'
             f' data-managed="{"1" if managed else "0"}">'
             f"<td>{esc(group)}</td>"
@@ -489,11 +645,12 @@ def dependencies_to_html(
             f"<td>{esc(version)}</td>"
             f"<td>{esc(scope)}</td>"
             f"<td>{esc(module)}</td>"
+            f"<td>{esc(profile)}</td>"
             f"<td>{'yes' if managed else ''}</td>"
             "</tr>"
         )
     table_body = "\n".join(body_rows) or (
-        '<tr data-empty="1"><td colspan="6">No dependencies in this scan.</td></tr>'
+        '<tr data-empty="1"><td colspan="7">No dependencies in this scan.</td></tr>'
     )
     conflict_checked = " checked" if filters["conflicts"] else ""
     search_value = esc(filters["search"])
@@ -572,6 +729,7 @@ def dependencies_to_html(
     <input type="search" id="search" placeholder="Search groupId, artifactId, version, module…"
            value="{search_value}" autocomplete="off"/>
     <select id="scope" aria-label="Scope">{"".join(scope_options)}</select>
+    <select id="profile" aria-label="Profile">{"".join(profile_options)}</select>
     <label class="toggle"><input type="checkbox" id="conflicts"{conflict_checked}/> Conflicts</label>
     <select id="module" aria-label="Module">{"".join(module_options)}</select>
     <button type="button" id="clear">Clear</button>
@@ -587,6 +745,7 @@ def dependencies_to_html(
         <th data-col="version">Version</th>
         <th data-col="scope">Scope</th>
         <th data-col="module">Module</th>
+        <th data-col="profile">Profile</th>
         <th data-col="managed">Managed</th>
       </tr>
     </thead>
@@ -599,6 +758,7 @@ def dependencies_to_html(
 (function () {{
   var search = document.getElementById("search");
   var scope = document.getElementById("scope");
+  var profileSel = document.getElementById("profile");
   var conflicts = document.getElementById("conflicts");
   var moduleSel = document.getElementById("module");
   var clearBtn = document.getElementById("clear");
@@ -648,8 +808,8 @@ def dependencies_to_html(
   }}
 
   function tableText(fmt) {{
-    var cols = ["group", "artifact", "version", "scope", "module", "managed"];
-    var labels = ["groupId", "artifactId", "version", "scope", "module", "managed"];
+    var cols = ["group", "artifact", "version", "scope", "module", "profile", "managed"];
+    var labels = ["groupId", "artifactId", "version", "scope", "module", "profile", "managed"];
     var list = rowsForCopy();
     if (fmt === "markdown") {{
       var lines = [
@@ -695,6 +855,7 @@ def dependencies_to_html(
   function applyFilters() {{
     var q = (search.value || "").trim().toLowerCase();
     var sc = scope.value || "";
+    var prof = profileSel.value || "";
     var mod = moduleSel.value || "";
     var onlyConflict = conflicts.checked;
     rows().forEach(function (tr) {{
@@ -707,6 +868,11 @@ def dependencies_to_html(
       var ok = true;
       if (q && hay.indexOf(q) === -1) ok = false;
       if (ok && sc && (tr.getAttribute("data-scope") || "compile") !== sc) ok = false;
+      if (ok && prof) {{
+        var rowProf = tr.getAttribute("data-profile") || "";
+        if (prof === "__direct__") {{ if (rowProf !== "") ok = false; }}
+        else {{ if (rowProf !== prof) ok = false; }}
+      }}
       if (ok && mod && (tr.getAttribute("data-module") || "") !== mod) ok = false;
       if (ok && onlyConflict && tr.getAttribute("data-conflict") !== "1") ok = false;
       tr.hidden = !ok;
@@ -772,11 +938,13 @@ def dependencies_to_html(
 
   search.addEventListener("input", applyFilters);
   scope.addEventListener("change", applyFilters);
+  profileSel.addEventListener("change", applyFilters);
   conflicts.addEventListener("change", applyFilters);
   moduleSel.addEventListener("change", applyFilters);
   clearBtn.addEventListener("click", function () {{
     search.value = "";
     scope.value = "";
+    profileSel.value = "";
     conflicts.checked = false;
     moduleSel.value = "";
     clearSelection();
@@ -796,6 +964,7 @@ def dependencies_to_html(
     var init = raw ? JSON.parse(raw.textContent || "{{}}") : {{}};
     if (init.search != null) search.value = init.search;
     if (init.scope != null) scope.value = init.scope;
+    if (init.profile != null) profileSel.value = init.profile;
     if (init.module != null) moduleSel.value = init.module;
     conflicts.checked = !!init.conflicts;
   }} catch (e) {{}}
@@ -864,7 +1033,7 @@ def dependencies_table_text(rows: list[dict], *, fmt: str = "tsv") -> str:
     ``fmt`` is ``tsv`` (tab-separated, Excel-friendly) or ``markdown``.
     Columns match the interactive HTML report.
     """
-    headers = ("groupId", "artifactId", "version", "scope", "module", "managed")
+    headers = ("groupId", "artifactId", "version", "scope", "module", "profile", "managed")
 
     def cells(row: dict) -> tuple[str, ...]:
         return (
@@ -873,6 +1042,7 @@ def dependencies_table_text(rows: list[dict], *, fmt: str = "tsv") -> str:
             str(row.get("version") or ""),
             str(row.get("scope") or ""),
             str(row.get("module_id") or ""),
+            str(row.get("profile") or ""),
             "yes" if row.get("managed") else "",
         )
 
@@ -900,7 +1070,7 @@ def dependencies_to_csv(rows: list[dict]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
-        ["groupId", "artifactId", "version", "scope", "module", "managed", "used_in_n", "conflict"]
+        ["groupId", "artifactId", "version", "scope", "module", "profile", "managed", "used_in_n", "conflict"]
     )
     for row in rows:
         writer.writerow(
@@ -910,6 +1080,7 @@ def dependencies_to_csv(rows: list[dict]) -> str:
                 row.get("version") or "",
                 row.get("scope") or "",
                 row.get("module_id") or "",
+                row.get("profile") or "",
                 "yes" if row.get("managed") else "",
                 row.get("used_in_n") if row.get("used_in_n") is not None else "",
                 "yes" if row.get("conflict") else "",

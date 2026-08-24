@@ -7,7 +7,7 @@ import subprocess
 from typing import Callable
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -80,6 +80,12 @@ def build_maven_deps_pane(
     for scope in ("compile", "test", "provided", "runtime", "system", "import"):
         scope_combo.addItem(scope, scope)
     toolbar_layout.addWidget(scope_combo)
+    profile_combo = QComboBox()
+    profile_combo.setObjectName("mavenDepProfile")
+    profile_combo.addItem("All profiles", "")
+    profile_combo.addItem("direct", "__direct__")
+    profile_combo.setToolTip("Filter by the profile that declares the dependency")
+    toolbar_layout.addWidget(profile_combo)
     view_combo = QComboBox()
     view_combo.setObjectName("mavenDepView")
     view_combo.addItem("Per-module", "per_module")
@@ -148,10 +154,10 @@ def build_maven_deps_pane(
     modules_list.setMaximumWidth(260)
     split.addWidget(modules_list)
 
-    table = QTableWidget(0, 6)
+    table = QTableWidget(0, 7)
     table.setObjectName("mavenDepsTable")
     table.setHorizontalHeaderLabels(
-        ["groupId (family)", "artifactId", "Version", "Used in", "Scope", "Module"]
+        ["groupId (family)", "artifactId", "Version", "Used in", "Scope", "Module", "Profile"]
     )
     table.verticalHeader().setVisible(False)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -167,6 +173,7 @@ def build_maven_deps_pane(
     header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+    header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
     split.addWidget(table)
     split.setStretchFactor(0, 0)
     split.setStretchFactor(1, 1)
@@ -205,6 +212,12 @@ def build_maven_deps_pane(
         scope = scope_combo.currentData() or ""
         if scope:
             rows = [r for r in rows if (r.get("scope") or "compile") == scope]
+        prof = profile_combo.currentData() or ""
+        if prof:
+            if prof == "__direct__":
+                rows = [r for r in rows if not (r.get("profile") or "")]
+            else:
+                rows = [r for r in rows if (r.get("profile") or "") == prof]
         family = state.get("family_filter") or ""
         if family:
             rows = [r for r in rows if family_prefix(str(r.get("group_id") or "")) == family]
@@ -259,6 +272,10 @@ def build_maven_deps_pane(
         conflict_bg = token_qcolor("redSoft", fallback="#e06c6c")
         if conflict_bg.alpha() == 255:
             conflict_bg.setAlphaF(0.12)
+        # Soft cyan tint for profile-declared dependencies.
+        profile_bg = token_qcolor("cyan", fallback="#5cc8d6")
+        if profile_bg.alpha() == 255:
+            profile_bg.setAlphaF(0.10)
         table.setSortingEnabled(False)
         table.setRowCount(0)
         table.setRowCount(len(rows))
@@ -276,6 +293,7 @@ def build_maven_deps_pane(
                 used_text,
                 row.get("scope") or "",
                 row.get("module_id") or "",
+                row.get("profile") or "",
             )
             tip_parts = [str(row.get("pom_path") or "")]
             if row.get("used_in_modules"):
@@ -305,6 +323,12 @@ def build_maven_deps_pane(
                 item.setToolTip(tip)
                 if row.get("conflict"):
                     item.setBackground(conflict_bg)
+                # Profile column (6): italic + soft tint for profile-declared deps.
+                if col == 6 and row.get("profile"):
+                    font = item.font()
+                    font.setItalic(True)
+                    item.setFont(font)
+                    item.setBackground(profile_bg)
                 table.setItem(index, col, item)
         table.setSortingEnabled(True)
         err_n = len(state["errors"])
@@ -376,6 +400,25 @@ def build_maven_deps_pane(
         )
         render_table()
 
+    def rebuild_profile_combo() -> None:
+        profile_combo.blockSignals(True)
+        prev = profile_combo.currentData()
+        profile_combo.clear()
+        profile_combo.addItem("All profiles", "")
+        profile_combo.addItem("direct", "__direct__")
+        profiles = sorted({
+            str(r.get("profile") or "").strip()
+            for r in state["rows"]
+            if str(r.get("profile") or "").strip()
+        })
+        for prof in profiles:
+            profile_combo.addItem(prof, prof)
+        # Restore previous selection if still available
+        idx = profile_combo.findData(prev)
+        if idx >= 0:
+            profile_combo.setCurrentIndex(idx)
+        profile_combo.blockSignals(False)
+
     def apply_result(result: dict) -> None:
         raw = list(result.get("dependencies") or [])
         state["rows"] = enrich_dependency_rows(raw)
@@ -384,6 +427,7 @@ def build_maven_deps_pane(
         state["loaded"] = True
         state["family_filter"] = ""
         rebuild_modules()
+        rebuild_profile_combo()
         rebuild_family_chips()
         render_table()
         if not state["modules"] and not state["rows"]:
@@ -536,6 +580,7 @@ def build_maven_deps_pane(
             "scope": scope_combo.currentData() or "",
             "conflicts": bool(conflicts_btn.isChecked()),
             "module": state.get("selected_module") or "",
+            "profile": profile_combo.currentData() or "",
         }
         html = dependencies_to_html(
             repo_path=repo_path,
@@ -707,6 +752,7 @@ def build_maven_deps_pane(
 
     search.textChanged.connect(lambda _t: filter_timer.start())
     scope_combo.currentIndexChanged.connect(lambda _i: render_table())
+    profile_combo.currentIndexChanged.connect(lambda _i: render_table())
     view_combo.currentIndexChanged.connect(lambda _i: render_table())
     conflicts_btn.toggled.connect(lambda _c: render_table())
     modules_list.currentItemChanged.connect(lambda _c, _p: on_module_changed())
