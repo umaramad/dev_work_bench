@@ -1341,10 +1341,19 @@ def _parse_tree_output(output: str) -> list[dict]:
 
 
 def resolve_maven_tree(
-    repo_path: str, *, verbose: bool = False, executable: str = "mvn"
+    repo_path: str,
+    *,
+    verbose: bool = False,
+    executable: str = "mvn",
+    extra_args: str = "",
 ) -> dict:
     """Run ``mvn dependency:tree`` and return structured output."""
-    cmd = [executable, "dependency:tree", "-DoutputType=text"]
+    import shlex
+
+    exe_parts = shlex.split(executable)
+    cmd: list[str] = exe_parts + ["dependency:tree", "-DoutputType=text"]
+    if extra_args:
+        cmd.extend(shlex.split(extra_args))
     if verbose:
         cmd.append("-Dverbose")
     try:
@@ -1409,14 +1418,23 @@ class MavenTreeWorker(Worker):
     """Run ``mvn dependency:tree`` for a local repo."""
 
     def __init__(
-        self, path: str, *, verbose: bool = False, executable: str = "mvn"
+        self,
+        path: str,
+        *,
+        verbose: bool = False,
+        executable: str = "mvn",
+        extra_args: str = "",
     ) -> None:
         super().__init__()
         self._path = path
         self._verbose = verbose
         self._executable = executable
+        self._extra_args = extra_args
 
     def work(self):
         return resolve_maven_tree(
-            self._path, verbose=self._verbose, executable=self._executable
+            self._path,
+            verbose=self._verbose,
+            executable=self._executable,
+            extra_args=self._extra_args,
         )

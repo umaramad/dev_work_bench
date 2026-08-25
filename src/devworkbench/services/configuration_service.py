@@ -302,6 +302,8 @@ SCHEMA: list[SettingDef] = [
         "Maven",
         dict(key="maven.executable", label="Maven executable", kind=SettingKind.STRING, default="mvn",
              hint="Path to the mvn binary (e.g. /usr/bin/mvn or mvn)", validator=_non_empty),
+        dict(key="maven.args", label="Extra Maven arguments", kind=SettingKind.STRING, default="",
+             hint="Arguments passed to every mvn invocation (e.g. -Djavax.net.ssl.trustStore=/path/to/truststore.jks)"),
         dict(key="maven.auto_resolve_tree", label="Auto-resolve tree on tab switch", kind=SettingKind.BOOL, default=False,
              hint="Run mvn dependency:tree automatically when the Tree tab is opened"),
     ),

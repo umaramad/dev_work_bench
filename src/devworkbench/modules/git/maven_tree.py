@@ -76,6 +76,14 @@ def build_maven_tree_pane(
         except Exception:  # noqa: BLE001
             return "mvn"
 
+    def _maven_args() -> str:
+        if config_service is None:
+            return ""
+        try:
+            return str(config_service.get("maven.args") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
     resolve_btn = button("Resolve tree", "primary")
     resolve_btn.setObjectName("mavenTreeResolve")
     toolbar_layout.addWidget(resolve_btn)
@@ -218,7 +226,7 @@ def build_maven_tree_pane(
         state["busy"] = True
         _set_enabled(False)
         status.setText("Resolving dependency tree…")
-        worker = MavenTreeWorker(repo_path, verbose=state["verbose"], executable=_maven_exe())
+        worker = MavenTreeWorker(repo_path, verbose=state["verbose"], executable=_maven_exe(), extra_args=_maven_args())
         pending_workers.append(worker)
 
         def done(result, current=worker) -> None:

@@ -610,7 +610,7 @@ class MavenPage(SettingsPage):
     icon = "maven"
     subtitle = "Executable and dependency tree options"
     groups = (
-        ("Core", ("maven.executable",)),
+        ("Core", ("maven.executable", "maven.args")),
         ("Tree", ("maven.auto_resolve_tree",)),
     )
 
