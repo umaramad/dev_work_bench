@@ -1415,7 +1415,11 @@ def resolve_maven_tree(
 
 
 class MavenTreeWorker(Worker):
-    """Run ``mvn dependency:tree`` for a local repo."""
+    """Run ``mvn dependency:tree`` for a local repo.
+
+    Emits ``signals.line`` for every line of Maven output so the UI can
+    show a live console while the command is still running.
+    """
 
     def __init__(
         self,
@@ -1431,10 +1435,94 @@ class MavenTreeWorker(Worker):
         self._executable = executable
         self._extra_args = extra_args
 
-    def work(self):
-        return resolve_maven_tree(
-            self._path,
-            verbose=self._verbose,
-            executable=self._executable,
-            extra_args=self._extra_args,
-        )
+    def work(self) -> dict:
+        import shlex
+
+        exe_parts = shlex.split(self._executable)
+        cmd: list[str] = exe_parts + ["dependency:tree", "-DoutputType=text"]
+        if self._extra_args:
+            cmd.extend(shlex.split(self._extra_args))
+        if self._verbose:
+            cmd.append("-Dverbose")
+
+        raw_lines: list[str] = []
+
+        # Show the command being executed in the log console
+        self.signals.line.emit("$ " + " ".join(cmd))
+        self.signals.line.emit("")
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=self._path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError:
+            return {
+                "tree": [],
+                "total_deps": 0,
+                "omitted_deps": 0,
+                "mvn_error": "Maven not found. Install Maven and ensure it's on PATH.",
+                "raw_output": "",
+            }
+
+        # Read stdout line-by-line so the UI can display it in real time.
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            stripped = line.rstrip("\n")
+            raw_lines.append(stripped)
+            self.signals.line.emit(stripped)
+
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raw_output = "\n".join(raw_lines)
+            self.signals.line.emit("\n*** Maven command timed out after 120s ***")
+            return {
+                "tree": [],
+                "total_deps": 0,
+                "omitted_deps": 0,
+                "mvn_error": "Maven command timed out after 120s.",
+                "raw_output": raw_output,
+            }
+
+        raw_output = "\n".join(raw_lines)
+
+        if proc.returncode != 0:
+            err = raw_output.strip()
+            if len(err) > 500:
+                err = err[:500] + "..."
+            return {
+                "tree": [],
+                "total_deps": 0,
+                "omitted_deps": 0,
+                "mvn_error": err or "Maven failed",
+                "raw_output": raw_output,
+            }
+
+        tree = _parse_tree_output(raw_output)
+
+        def _count(nodes: list[dict]) -> tuple[int, int]:
+            total = 0
+            omitted = 0
+            for n in nodes:
+                total += 1
+                if n.get("omitted"):
+                    omitted += 1
+                t, o = _count(n.get("children") or [])
+                total += t
+                omitted += o
+            return total, omitted
+
+        total, omitted = _count(tree)
+        return {
+            "tree": tree,
+            "total_deps": total,
+            "omitted_deps": omitted,
+            "mvn_error": "",
+            "raw_output": raw_output,
+        }

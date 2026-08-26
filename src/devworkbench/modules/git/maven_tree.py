@@ -4,20 +4,21 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QThreadPool, Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QHBoxLayout,
-    QLabel,
     QMenu,
+    QPlainTextEdit,
+    QSplitter,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
-    QApplication,
 )
 
 from devworkbench.ui.theme import token_qcolor
@@ -88,10 +89,21 @@ def build_maven_tree_pane(
     resolve_btn.setObjectName("mavenTreeResolve")
     toolbar_layout.addWidget(resolve_btn)
 
+    log_toggle = QToolButton()
+    log_toggle.setObjectName("mavenTreeLogToggle")
+    log_toggle.setText("Show log")
+    log_toggle.setCheckable(True)
+    log_toggle.setToolTip("Show/hide raw Maven console output")
+    toolbar_layout.addWidget(log_toggle)
+
     status = styled_label("Click 'Resolve tree' to load the transitive dependency tree.", "hint")
     status.setObjectName("mavenTreeStatus")
     layout.addWidget(toolbar)
     layout.addWidget(status)
+
+    # -- Splitter: tree + log console -----------------------------------------
+    splitter = QSplitter(Qt.Orientation.Vertical)
+    splitter.setChildrenCollapsible(False)
 
     # -- Tree widget -----------------------------------------------------------
     tree = QTreeWidget()
@@ -108,7 +120,23 @@ def build_maven_tree_pane(
     header.setSectionResizeMode(1, header.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)
     header.setSectionResizeMode(3, header.ResizeMode.ResizeToContents)
-    layout.addWidget(tree, 1)
+    splitter.addWidget(tree)
+
+    # -- Log console -----------------------------------------------------------
+    log_console = QPlainTextEdit()
+    log_console.setObjectName("mavenTreeLog")
+    log_console.setReadOnly(True)
+    log_console.setMaximumBlockCount(5000)
+    log_console.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+    log_font = QFont("monospace")
+    log_font.setStyleHint(QFont.StyleHint.Monospace)
+    log_console.setFont(log_font)
+    log_console.setPlaceholderText("Maven output will appear here…")
+    log_console.setVisible(False)
+    splitter.addWidget(log_console)
+    splitter.setStretchFactor(0, 3)
+    splitter.setStretchFactor(1, 1)
+    layout.addWidget(splitter, 1)
 
     # -- State -----------------------------------------------------------------
     state: dict = {
@@ -116,6 +144,7 @@ def build_maven_tree_pane(
         "loaded": False,
         "busy": False,
         "verbose": False,
+        "raw_output": [],     # accumulated raw Maven output lines
     }
 
     # -- Colors ----------------------------------------------------------------
@@ -126,9 +155,56 @@ def build_maven_tree_pane(
     if winner_bg.alpha() == 255:
         winner_bg.setAlphaF(0.10)
 
+    # Log color tokens
+    _log_green = token_qcolor("green", fallback="#4cc38a")
+    _log_dim = token_qcolor("text3", fallback="#6d7686")
+    _log_red = token_qcolor("red", fallback="#e06c6c")
+    _log_amber = token_qcolor("amber", fallback="#e2a94f")
+    _log_default = token_qcolor("text", fallback="#e3e7ef")
+
+    def _log_color_for_line(line: str) -> QColor:
+        """Pick a color based on line content."""
+        if not line:
+            return _log_default
+        if line.startswith("$"):
+            return _log_green
+        if line.startswith(("[ERROR]", "***")):
+            return _log_red
+        if line.startswith("[WARNING]"):
+            return _log_amber
+        if line.startswith("[INFO]"):
+            return _log_dim
+        return _log_default
+
     def _set_enabled(enabled: bool) -> None:
         resolve_btn.setEnabled(enabled)
         verbose_btn.setEnabled(enabled)
+
+    # -- Log helpers ----------------------------------------------------------
+    def _clear_log() -> None:
+        log_console.clear()
+        state["raw_output"] = []
+
+    def _append_log_line(line: str) -> None:
+        state["raw_output"].append(line)
+        cursor = log_console.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if log_console.document().blockCount() > 1 or cursor.block().length() > 1:
+            cursor.insertBlock()  # newline before new content
+        fmt = QTextCharFormat()
+        fmt.setForeground(_log_color_for_line(line))
+        cursor.setCharFormat(fmt)
+        cursor.insertText(line)
+        log_console.setTextCursor(cursor)
+        # Auto-scroll to bottom
+        sb = log_console.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _toggle_log_console(checked: bool) -> None:
+        log_console.setVisible(checked)
+        log_toggle.setText("Hide log" if checked else "Show log")
+        if checked:
+            log_console.setFocus()
 
     # -- Tree building ---------------------------------------------------------
     def _add_nodes(parent_item: QTreeWidgetItem | None, nodes: list[dict]) -> None:
@@ -225,9 +301,13 @@ def build_maven_tree_pane(
             return
         state["busy"] = True
         _set_enabled(False)
+        _clear_log()
         status.setText("Resolving dependency tree…")
         worker = MavenTreeWorker(repo_path, verbose=state["verbose"], executable=_maven_exe(), extra_args=_maven_args())
         pending_workers.append(worker)
+
+        # Stream raw output lines into the log console as they arrive
+        worker.signals.line.connect(_append_log_line)
 
         def done(result, current=worker) -> None:
             if current in pending_workers:
@@ -315,7 +395,8 @@ def build_maven_tree_pane(
     search.textChanged.connect(lambda _t: filter_timer.start())
     scope_combo.currentIndexChanged.connect(lambda _i: apply_filters())
     resolve_btn.clicked.connect(resolve)
-    verbose_btn.toggled.connect(lambda _checked: setattr(state, "verbose", _checked))
+    verbose_btn.toggled.connect(lambda checked: state.__setitem__("verbose", checked))
+    log_toggle.toggled.connect(_toggle_log_console)
     tree.customContextMenuRequested.connect(show_context_menu)
 
     root.rescan = resolve  # type: ignore[attr-defined]
