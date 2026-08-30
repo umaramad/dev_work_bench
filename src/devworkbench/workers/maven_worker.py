@@ -1414,6 +1414,89 @@ def resolve_maven_tree(
     }
 
 
+def _fallback_local_parse(
+    repo_path: str,
+    *,
+    error_message: str = "",
+    worker: MavenTreeWorker | None = None,
+) -> dict:
+    """Parse pom.xml locally when ``mvn dependency:tree`` fails.
+
+    Returns a tree-compatible dict with flat declared dependencies for the
+    root module only.  Emits log lines via *worker* when provided.
+    """
+    def _noop(_line: str) -> None:
+        pass
+
+    emit = worker.signals.line.emit if worker else _noop
+
+    emit("")
+    emit("[Fallback] Scanning local pom.xml files…")
+
+    try:
+        result = scan_declared_dependencies(repo_path)
+    except Exception as exc:  # noqa: BLE001
+        emit(f"[Fallback] Scan failed: {exc}")
+        return {
+            "fallback": True,
+            "fallback_reason": f"Local scan failed: {exc}",
+            "tree": [],
+            "total_deps": 0,
+            "omitted_deps": 0,
+            "raw_output": "",
+        }
+
+    errors = result.get("errors") or []
+    if errors:
+        for err in errors:
+            emit(f"[Fallback] Warning: {err.get('pom_path', '')}: {err.get('error', '')}")
+
+    modules = result.get("modules") or []
+    rows = result.get("dependencies") or []
+
+    # Filter to root module only (rel_path == "." means it's at repo root)
+    root_module_id = None
+    for mod in modules:
+        if mod.get("rel_path") == ".":
+            root_module_id = mod.get("module_id")
+            break
+    # Fallback: use first module if no root found
+    if root_module_id is None and modules:
+        root_module_id = modules[0].get("module_id")
+
+    if root_module_id is not None:
+        rows = [r for r in rows if r.get("module_id") == root_module_id]
+
+    # Convert flat rows to tree node dicts (no children — no transitive info)
+    flat_nodes: list[dict] = []
+    for row in rows:
+        node: dict = {
+            "group_id": row.get("group_id") or "",
+            "artifact_id": row.get("artifact_id") or "",
+            "version": row.get("version") or "",
+            "scope": row.get("scope") or "compile",
+            "omitted": False,
+            "omitted_reason": "",
+            "children": [],
+        }
+        flat_nodes.append(node)
+
+    emit(f"[Fallback] Found {len(flat_nodes)} declared dependencies"
+         + (f" for {root_module_id}" if root_module_id else ""))
+
+    # Sort by groupId, then artifactId
+    flat_nodes.sort(key=lambda n: (n["group_id"].casefold(), n["artifact_id"].casefold()))
+
+    return {
+        "fallback": True,
+        "fallback_reason": error_message or "Maven CLI unavailable",
+        "tree": flat_nodes,
+        "total_deps": len(flat_nodes),
+        "omitted_deps": 0,
+        "raw_output": "",
+    }
+
+
 class MavenTreeWorker(Worker):
     """Run ``mvn dependency:tree`` for a local repo.
 
@@ -1460,13 +1543,13 @@ class MavenTreeWorker(Worker):
                 text=True,
             )
         except FileNotFoundError:
-            return {
-                "tree": [],
-                "total_deps": 0,
-                "omitted_deps": 0,
-                "mvn_error": "Maven not found. Install Maven and ensure it's on PATH.",
-                "raw_output": "",
-            }
+            self.signals.line.emit("")
+            self.signals.line.emit("*** Maven not found — falling back to local pom.xml parse ***")
+            return _fallback_local_parse(
+                self._path,
+                error_message="Maven not found. Install Maven and ensure it's on PATH.",
+                worker=self,
+            )
 
         # Read stdout line-by-line so the UI can display it in real time.
         assert proc.stdout is not None
@@ -1481,14 +1564,13 @@ class MavenTreeWorker(Worker):
             proc.kill()
             proc.wait()
             raw_output = "\n".join(raw_lines)
-            self.signals.line.emit("\n*** Maven command timed out after 120s ***")
-            return {
-                "tree": [],
-                "total_deps": 0,
-                "omitted_deps": 0,
-                "mvn_error": "Maven command timed out after 120s.",
-                "raw_output": raw_output,
-            }
+            self.signals.line.emit("")
+            self.signals.line.emit("*** Maven timed out — falling back to local pom.xml parse ***")
+            return _fallback_local_parse(
+                self._path,
+                error_message="Maven command timed out after 120s.",
+                worker=self,
+            )
 
         raw_output = "\n".join(raw_lines)
 
@@ -1496,13 +1578,13 @@ class MavenTreeWorker(Worker):
             err = raw_output.strip()
             if len(err) > 500:
                 err = err[:500] + "..."
-            return {
-                "tree": [],
-                "total_deps": 0,
-                "omitted_deps": 0,
-                "mvn_error": err or "Maven failed",
-                "raw_output": raw_output,
-            }
+            self.signals.line.emit("")
+            self.signals.line.emit(f"*** Maven failed (exit {proc.returncode}) — falling back to local pom.xml parse ***")
+            return _fallback_local_parse(
+                self._path,
+                error_message=err or "Maven failed",
+                worker=self,
+            )
 
         tree = _parse_tree_output(raw_output)
 

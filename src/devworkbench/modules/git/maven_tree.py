@@ -101,6 +101,13 @@ def build_maven_tree_pane(
     layout.addWidget(toolbar)
     layout.addWidget(status)
 
+    # -- Fallback warning banner (hidden by default) --------------------------
+    fallback_banner = styled_label("", "warning")
+    fallback_banner.setObjectName("mavenTreeFallbackBanner")
+    fallback_banner.setWordWrap(True)
+    fallback_banner.setVisible(False)
+    layout.addWidget(fallback_banner)
+
     # -- Splitter: tree + log console -----------------------------------------
     splitter = QSplitter(Qt.Orientation.Vertical)
     splitter.setChildrenCollapsible(False)
@@ -302,6 +309,7 @@ def build_maven_tree_pane(
         state["busy"] = True
         _set_enabled(False)
         _clear_log()
+        fallback_banner.setVisible(False)
         status.setText("Resolving dependency tree…")
         worker = MavenTreeWorker(repo_path, verbose=state["verbose"], executable=_maven_exe(), extra_args=_maven_args())
         pending_workers.append(worker)
@@ -319,23 +327,33 @@ def build_maven_tree_pane(
             if not isinstance(result, dict):
                 status.setText("Unexpected result from tree worker.")
                 return
-            mvn_err = result.get("mvn_error") or ""
-            if mvn_err:
-                status.setText(f"Maven error: {mvn_err}")
-                state["raw_tree"] = []
-                state["loaded"] = False
-                tree.clear()
-                return
+
+            # Handle fallback mode (mvn failed, local parse used instead)
+            is_fallback = bool(result.get("fallback"))
+            if is_fallback:
+                reason = result.get("fallback_reason") or "unknown error"
+                fallback_banner.setText(
+                    f"\u26a0\ufe0f Showing declared dependencies only (local parsing). "
+                    f"Maven error: {reason}"
+                )
+                fallback_banner.setVisible(True)
+            else:
+                fallback_banner.setVisible(False)
+
             state["raw_tree"] = result.get("tree") or []
             state["loaded"] = True
             total = result.get("total_deps", 0)
             omitted = result.get("omitted_deps", 0)
             rebuild_tree()
             apply_filters()
-            extra = f" · {omitted} omitted" if omitted else ""
-            mode = "verbose" if state["verbose"] else ""
-            mode_str = f" ({mode})" if mode else ""
-            status.setText(f"{total} deps{extra}{mode_str}")
+
+            if is_fallback:
+                status.setText(f"{total} declared deps (fallback — mvn unavailable)")
+            else:
+                extra = f" \u00b7 {omitted} omitted" if omitted else ""
+                mode = "verbose" if state["verbose"] else ""
+                mode_str = f" ({mode})" if mode else ""
+                status.setText(f"{total} deps{extra}{mode_str}")
 
         def failed(exc, current=worker) -> None:
             if current in pending_workers:
