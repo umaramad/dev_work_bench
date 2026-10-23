@@ -673,6 +673,22 @@ def version_sort_key(version: str) -> Any:
     return cmp_to_key(compare_versions)(str(version or ""))
 
 
+def jar_filename(usage: Usage) -> str:
+    """JAR filename for display: the real build-output name when known,
+    else the Maven default naming convention ``<artifactId>-<version>[ -<classifier>].<type>``.
+
+    Returns ``""`` when the version is unresolved — a filename must never
+    be invented from an unresolvable ``${…}`` expression.
+    """
+    if usage.filename:
+        return usage.filename
+    if not usage.version:
+        return ""
+    classifier = f"-{usage.classifier}" if usage.classifier else ""
+    extension = (usage.type or "jar").strip() or "jar"
+    return f"{usage.artifact_id}-{usage.version}{classifier}.{extension}"
+
+
 def conflict_key(usage: Usage) -> tuple[str, str, str, str]:
     """Conflict identity: normalized coordinates plus type and classifier.
 

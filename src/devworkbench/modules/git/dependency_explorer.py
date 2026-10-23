@@ -51,6 +51,7 @@ from devworkbench.services.dependency_explorer import (
     VERDICT_UNKNOWN,
     compare_versions,
     conflict_report_text,
+    jar_filename,
     load_overrides,
     reclassify_entry,
     save_overrides,
@@ -493,6 +494,9 @@ def build_dependency_explorer_pane(
             f"type: {usage.type}" + (f" · classifier: {usage.classifier}" if usage.classifier else ""),
             f"optional: {usage.optional} · version source: {usage.version_source}",
         ]
+        jar = jar_filename(usage)
+        if jar:
+            tip.append(f"jar: {jar}")
         if usage.declared_version and usage.declared_version != usage.version:
             tip.append(f"declared: {usage.declared_version}")
         if usage.filename:
@@ -543,7 +547,11 @@ def build_dependency_explorer_pane(
             group["usages"],
             key=lambda u: (u.repo_name.casefold(), compare_versions(u.version, ""), u.module_id),
         ):
-            item.addChild(_usage_item(usage))
+            # Children show the jar filename (what differs per version);
+            # the parent row carries the coordinates.
+            item.addChild(
+                _usage_item(usage, name=jar_filename(usage) or usage.coordinates)
+            )
         return item
 
     def _conflict_item(group: dict) -> QTreeWidgetItem:
@@ -568,6 +576,11 @@ def build_dependency_explorer_pane(
         tip = [
             "Conflicting known versions: " + " vs ".join(group["versions"]),
             "Repositories: " + ", ".join(sorted(group["known_repo_names"])),
+            "JARs: " + ", ".join(
+                jar_filename(usage) or usage.gav()
+                for usage in group["usages"]
+                if usage.version
+            ),
             "Versions may resolve differently per repository — not necessarily a runtime conflict.",
         ]
         if group.get("unresolved"):
@@ -586,7 +599,7 @@ def build_dependency_explorer_pane(
         for column in range(len(_COLUMNS)):
             item.setBackground(column, tint)
         for usage in group["usages"]:
-            child = _usage_item(usage)
+            child = _usage_item(usage, name=jar_filename(usage) or usage.coordinates)
             if usage.version_source == "unresolved" or not usage.version:
                 child.setText(1, f"{usage.declared_version or '—'} (unresolved)")
             item.addChild(child)
