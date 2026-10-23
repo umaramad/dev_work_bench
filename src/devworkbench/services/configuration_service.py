@@ -219,6 +219,9 @@ SCHEMA: list[SettingDef] = [
              default="{}"),
         dict(key="git.home.last_refresh", label="Git home per-group last status refresh",
              kind=SettingKind.STRING, default="{}"),
+        dict(key="git.dep_explorer.overrides", label="Dependency explorer J2EE overrides",
+             kind=SettingKind.STRING, default="{}",
+             hint="Per-repository manual J2EE classification overrides (JSON)"),
     ),
     # -------------------------------------------------------------------- AI
     *_defs(

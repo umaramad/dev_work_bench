@@ -63,6 +63,7 @@ from devworkbench.modules.git.dialog import (
     ScanReposDialog,
     rename_favorite_group,
 )
+from devworkbench.modules.git.dependency_explorer import build_dependency_explorer_pane
 from devworkbench.modules.git.maven_deps import build_maven_deps_pane
 from devworkbench.modules.git.maven_tree import build_maven_tree_pane
 from devworkbench.services.configuration_service import TOPIC_GIT_OPEN_GROUP
@@ -245,6 +246,13 @@ def build_view(icons, ctx=None) -> QWidget:
     manage_button.setToolTip("Rename, merge or delete repository groups")
     _bump_font(manage_button, 2, 13)
     toolbar_layout.addWidget(manage_button)
+    explorer_button = button("Dependency Explorer", "ghost")
+    explorer_button.setObjectName("dependencyExplorerButton")
+    explorer_button.setToolTip(
+        "Search Maven dependencies across every J2EE repository in this group"
+    )
+    _bump_font(explorer_button, 2, 13)
+    toolbar_layout.addWidget(explorer_button)
     refresh_button = icon_button(icons, "refresh", "Refresh repository list")
     refresh_button.setObjectName("refreshReposButton")
     toolbar_layout.addWidget(refresh_button)
@@ -895,11 +903,13 @@ def build_view(icons, ctx=None) -> QWidget:
                 groups_empty.hide()
                 groups_list.show()
                 manage_button.setEnabled(False)
+                explorer_button.setEnabled(False)
                 _select_group_item("__demo__")
                 return
 
             favorites = favorites_repo.by_kind("folder")
             manage_button.setEnabled(bool(favorites))
+            explorer_button.setEnabled(bool(favorites))
             counts = section_counts()
             if not counts:
                 groups_empty.setText(
@@ -1137,6 +1147,10 @@ def build_view(icons, ctx=None) -> QWidget:
         """Right-click on a left-rail group row: Rename (incl. Ungrouped) + Manage."""
         menu = QMenu(root)
         if key != "__demo__":
+            explorer_act = menu.addAction("Dependency Explorer…")
+            explorer_act.triggered.connect(
+                lambda _c=False, k=key: open_dependency_explorer(k)
+            )
             rename_act = menu.addAction("Rename group…")
             rename_act.triggered.connect(lambda _c=False, k=key: rename_group_prompt(k))
             menu.addSeparator()
@@ -2584,6 +2598,87 @@ def build_view(icons, ctx=None) -> QWidget:
         refresh_favorites()
 
     # ------------------------------------------------------------ repo tabs
+    def explorer_groups() -> list[str]:
+        """Distinct group keys for the Dependency Explorer selector (A–Z)."""
+        if favorites_repo is None:
+            return []
+        favorites = favorites_repo.by_kind("folder")
+        groups = {(favorite.group_name or "").strip() for favorite in favorites}
+        groups.discard("")
+        ordered = sorted(groups, key=str.casefold)
+        if any((favorite.group_name or "").strip() == "" for favorite in favorites):
+            ordered.append("")  # Ungrouped last
+        return ordered
+
+    def explorer_repos(group: str) -> list[tuple[str, str]]:
+        """Fresh ``(label, path)`` snapshot for one group (re-read on scan)."""
+        if favorites_repo is None:
+            return []
+        return [
+            (favorite.label or favorite.ref, favorite.ref)
+            for favorite in favorites_repo.by_kind("folder")
+            if (favorite.group_name or "").strip() == group
+        ]
+
+    def open_dependency_view(path: str) -> None:
+        """Open a repository tab and select its existing Dependencies tab."""
+        if not path:
+            return
+        open_folder(path)
+        for index in range(1, tabs.count()):
+            page = tabs.widget(index)
+            if page.property("repoPath") != path:
+                continue
+            tabs.setCurrentIndex(index)
+            inner = page.findChild(QTabWidget, "repoInnerTabs")
+            if inner is None:
+                return
+            for tab_index in range(inner.count()):
+                if inner.widget(tab_index).objectName() == "mavenDepsPane":
+                    inner.setCurrentIndex(tab_index)
+                    pane = inner.widget(tab_index)
+                    if hasattr(pane, "ensure_scanned"):
+                        pane.ensure_scanned()
+                    return
+            return
+
+    def open_dependency_explorer(group_key: str) -> None:
+        """Open (or focus) the group-level Dependency Explorer tab."""
+        if favorites_repo is None or group_key is None or group_key == "__demo__":
+            return
+        for index in range(1, tabs.count()):
+            page = tabs.widget(index)
+            if (
+                page.property("explorerKind") == "dependencyExplorer"
+                and page.property("explorerGroup") == group_key
+            ):
+                tabs.setCurrentIndex(index)
+                pane = page.findChild(QWidget, "dependencyExplorerPane")
+                if pane is not None and hasattr(pane, "rescan"):
+                    pane.rescan()
+                return
+        page = QWidget()
+        page.setProperty("explorerKind", "dependencyExplorer")
+        page.setProperty("explorerGroup", group_key)
+        page.closed = False
+        explorer_workers: list = []
+        page.pending_workers = explorer_workers
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(4, 4, 4, 4)
+        pane = build_dependency_explorer_pane(
+            group_name=group_key,
+            groups_provider=explorer_groups,
+            repos_provider=explorer_repos,
+            open_dependency_view=open_dependency_view,
+            pending_workers=explorer_workers,
+            is_closed=lambda: bool(getattr(page, "closed", False)),
+            config_service=service,
+            events=events,
+        )
+        page_layout.addWidget(pane)
+        tabs.addTab(page, f"Deps Explorer · {group_key or 'Ungrouped'}")
+        tabs.setCurrentIndex(tabs.count() - 1)
+
     def open_folder(path: str, demo: bool = False) -> None:
         if not path:
             return
@@ -3021,6 +3116,9 @@ def build_view(icons, ctx=None) -> QWidget:
     add_button.clicked.connect(add_repository)
     search_edit.textChanged.connect(lambda _text: _on_filter_changed())
     manage_button.clicked.connect(manage_groups)
+    explorer_button.clicked.connect(
+        lambda: open_dependency_explorer(landing_state["group"])
+    )
     refresh_button.clicked.connect(refresh_favorites)
     favorites_scroll.customContextMenuRequested.connect(show_card_menu)
     # Lazy pagination: scrolling near the bottom materializes the next chunk.

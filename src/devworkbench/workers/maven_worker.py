@@ -76,6 +76,8 @@ def _parse_dependency(elem: ET.Element, *, managed: bool) -> dict | None:
         "version": _child_text(elem, "version"),
         "scope": _child_text(elem, "scope", "compile") or "compile",
         "type": _child_text(elem, "type", "jar") or "jar",
+        "classifier": _child_text(elem, "classifier"),
+        "optional": (_child_text(elem, "optional", "false") or "false").lower(),
         "managed": managed,
     }
 
@@ -124,6 +126,35 @@ def _parse_profile_dependencies(root: ET.Element) -> list[dict]:
                 row["profile"] = profile_id
                 deps.append(row)
     return deps
+
+
+def _parse_plugins(root: ET.Element) -> list[str]:
+    """Build plugin artifactIds (``plugins`` + ``pluginManagement``).
+
+    Used as framework evidence by the J2EE classifier (e.g.
+    ``spring-boot-maven-plugin``) — never for execution.
+    """
+    ids: list[str] = []
+    build = _find_child(root, "build")
+    if build is None:
+        return ids
+    containers: list[ET.Element] = []
+    plugins = _find_child(build, "plugins")
+    if plugins is not None:
+        containers.append(plugins)
+    mgmt = _find_child(build, "pluginManagement")
+    if mgmt is not None:
+        inner = _find_child(mgmt, "plugins")
+        if inner is not None:
+            containers.append(inner)
+    for container in containers:
+        for child in list(container):
+            if _tag_name(child.tag) != "plugin":
+                continue
+            artifact_id = _child_text(child, "artifactId")
+            if artifact_id and artifact_id not in ids:
+                ids.append(artifact_id)
+    return ids
 
 
 def _parse_profile_managed_dependencies(root: ET.Element) -> list[dict]:
@@ -197,6 +228,7 @@ def parse_pom_file(pom_path: str) -> dict:
         "module_dirs": module_dirs,
         "properties": _parse_properties(root),
         "parent": parent_info,
+        "plugins": _parse_plugins(root),
         "dependencies": _parse_dependencies_block(root, managed=False),
         "managed_dependencies": _parse_dependencies_block(root, managed=True),
         "profile_dependencies": _parse_profile_dependencies(root),
@@ -487,6 +519,10 @@ def scan_declared_dependencies(repo_path: str) -> dict:
                 "rel_path": "." if rel == "." else rel,
                 "group_id": resolve_properties(meta.get("group_id") or "", props),
                 "version": resolve_properties(meta.get("version") or "", props),
+                "packaging": resolve_properties(meta.get("packaging") or "jar", props) or "jar",
+                "module_dirs": list(meta.get("module_dirs") or []),
+                "parent": meta.get("parent"),
+                "plugins": list(meta.get("plugins") or []),
             }
         )
 
@@ -499,34 +535,47 @@ def scan_declared_dependencies(repo_path: str) -> dict:
         inherited_profile = _inherited_profile_dependencies(abs_pom, by_path, by_ga)
 
         # Build merged map: inherited first, own overrides, profile fills gaps.
-        dep_map: dict[tuple[str, str], dict] = {}
+        # Each entry keeps its provenance — direct (own <dependencies>),
+        # inherited (parent chain) or profile (conditional declarations) —
+        # so consumers can distinguish a declaration from an inheritance.
+        dep_map: dict[tuple[str, str], tuple[dict, str]] = {}
         for dep in inherited:
             key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
             if key[0] and key[1]:
-                dep_map[key] = dep
+                dep_map[key] = (dep, "inherited")
         for dep in own_deps:
             key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
             if key[0] and key[1]:
-                dep_map[key] = dep  # child overrides parent
+                dep_map[key] = (dep, "direct")  # child overrides parent
         for dep in inherited_profile:
             key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
             if key[0] and key[1] and key not in dep_map:
-                dep_map[key] = dep  # profile fills gaps only
+                dep_map[key] = (dep, "inherited")  # profile fills gaps only
         for dep in own_profile_deps:
             key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
             if key[0] and key[1] and key not in dep_map:
-                dep_map[key] = dep
+                dep_map[key] = (dep, "profile")
 
-        declared: list[dict] = list(dep_map.values())
-        # Include managed-only entries from this pom as managed rows.
-        declared.extend(meta.get("managed_dependencies") or [])
+        declared: list[tuple[dict, str]] = list(dep_map.values())
+        # Managed-only entries are kept as their own rows — a version in
+        # dependencyManagement alone never proves the dependency is used.
+        declared.extend((dep, "managed") for dep in meta.get("managed_dependencies") or [])
 
-        for dep in declared:
+        for dep, origin in declared:
             group_id = resolve_properties(dep.get("group_id") or "", props)
             artifact_id = resolve_properties(dep.get("artifact_id") or "", props)
             version = resolve_properties(dep.get("version") or "", props)
+            declared_version = version
             if not version:
                 version = managed_versions.get((group_id, artifact_id), "")
+            if "${" in version:
+                version_source = "unresolved"  # expression we could not resolve
+            elif declared_version:
+                version_source = "explicit"
+            elif version:
+                version_source = "managed"
+            else:
+                version_source = "none"
             scope = resolve_properties(dep.get("scope") or "compile", props) or "compile"
             dep_type = resolve_properties(dep.get("type") or "jar", props) or "jar"
             rows.append(
@@ -540,6 +589,10 @@ def scan_declared_dependencies(repo_path: str) -> dict:
                     "pom_path": abs_pom,
                     "managed": bool(dep.get("managed")),
                     "profile": dep.get("profile") or "",
+                    "origin": origin,
+                    "classifier": resolve_properties(dep.get("classifier") or "", props),
+                    "optional": dep.get("optional") or "false",
+                    "version_source": version_source,
                 }
             )
 
