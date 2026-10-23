@@ -364,6 +364,21 @@ def _effective_managed_versions(
     return managed
 
 
+def _dep_identity_key(dep: dict) -> tuple[str, str, str, str]:
+    """Maven dependency identity: (groupId, artifactId, type, classifier).
+
+    Maven keys dependencies by this 4-tuple — a ``classifier``/``type``
+    variant (e.g. ``tests``) is a *distinct* dependency and must never
+    override the main artifact of the same GAV.
+    """
+    return (
+        dep.get("group_id") or "",
+        dep.get("artifact_id") or "",
+        dep.get("type") or "jar",
+        dep.get("classifier") or "",
+    )
+
+
 def _inherited_dependencies(
     pom_path: str, by_path: dict[str, dict], by_ga: dict[tuple, str]
 ) -> list[dict]:
@@ -371,19 +386,19 @@ def _inherited_dependencies(
 
     In Maven, every dependency declared in a parent's ``<dependencies>`` block
     is automatically inherited by all child modules (unless the child
-    re-declares the same groupId:artifactId, which overrides the parent's
-    version/scope/type).  This function walks the ancestor chain root-first
-    and returns the de-duplicated set of inherited dependencies.
+    re-declares the same groupId:artifactId:type:classifier, which overrides
+    the parent's version/scope).  This function walks the ancestor chain
+    root-first and returns the de-duplicated set of inherited dependencies.
     """
     chain = _ancestor_chain(pom_path, by_path, by_ga)
     # Root-first iteration so closer-parent wins over grandparent.
-    inherited: dict[tuple[str, str], dict] = {}
+    inherited: dict[tuple[str, str, str, str], dict] = {}
     for path in chain:
         if path == pom_path:
             continue  # skip self — own deps handled separately
         meta = by_path.get(path) or {}
         for dep in meta.get("dependencies") or []:
-            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            key = _dep_identity_key(dep)
             if key[0] and key[1]:
                 inherited[key] = dep
     return list(inherited.values())
@@ -398,13 +413,13 @@ def _inherited_profile_dependencies(
     dependencies declared inside ``<profiles>/<profile>/<dependencies>``.
     """
     chain = _ancestor_chain(pom_path, by_path, by_ga)
-    inherited: dict[tuple[str, str], dict] = {}
+    inherited: dict[tuple[str, str, str, str], dict] = {}
     for path in chain:
         if path == pom_path:
             continue
         meta = by_path.get(path) or {}
         for dep in meta.get("profile_dependencies") or []:
-            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            key = _dep_identity_key(dep)
             if key[0] and key[1]:
                 inherited[key] = dep
     return list(inherited.values())
@@ -505,8 +520,8 @@ def scan_declared_dependencies(repo_path: str) -> dict:
 
     for pom_path in pom_paths:
         abs_pom = os.path.abspath(pom_path)
-        meta = by_path.get(abs_pom)
-        if meta is None:
+        meta = by_path.get(abs_pom) or {}
+        if not meta:
             continue
         props = _effective_properties(abs_pom, by_path, by_ga)
         managed_versions = _effective_managed_versions(abs_pom, by_path, by_ga, props)
@@ -538,21 +553,21 @@ def scan_declared_dependencies(repo_path: str) -> dict:
         # Each entry keeps its provenance — direct (own <dependencies>),
         # inherited (parent chain) or profile (conditional declarations) —
         # so consumers can distinguish a declaration from an inheritance.
-        dep_map: dict[tuple[str, str], tuple[dict, str]] = {}
+        dep_map: dict[tuple[str, str, str, str], tuple[dict, str]] = {}
         for dep in inherited:
-            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            key = _dep_identity_key(dep)
             if key[0] and key[1]:
                 dep_map[key] = (dep, "inherited")
         for dep in own_deps:
-            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            key = _dep_identity_key(dep)
             if key[0] and key[1]:
                 dep_map[key] = (dep, "direct")  # child overrides parent
         for dep in inherited_profile:
-            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            key = _dep_identity_key(dep)
             if key[0] and key[1] and key not in dep_map:
                 dep_map[key] = (dep, "inherited")  # profile fills gaps only
         for dep in own_profile_deps:
-            key = (dep.get("group_id") or "", dep.get("artifact_id") or "")
+            key = _dep_identity_key(dep)
             if key[0] and key[1] and key not in dep_map:
                 dep_map[key] = (dep, "profile")
 

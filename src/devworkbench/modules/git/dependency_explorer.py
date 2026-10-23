@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -49,6 +50,7 @@ from devworkbench.services.dependency_explorer import (
     VERDICT_LABELS,
     VERDICT_UNKNOWN,
     compare_versions,
+    conflict_report_text,
     load_overrides,
     reclassify_entry,
     save_overrides,
@@ -56,6 +58,7 @@ from devworkbench.services.dependency_explorer import (
 from devworkbench.ui.theme import token_qcolor
 from devworkbench.ui.widgets.common import button, search_field, styled_label
 from devworkbench.workers.group_maven_worker import GroupScanWorker
+from devworkbench.workers.maven_worker import gav_string, maven_xml_snippet
 
 logger = logging.getLogger("devworkbench.modules.git.dependency_explorer")
 
@@ -64,6 +67,9 @@ _OVERRIDE_KEY = "git.dep_explorer.overrides"
 _GROUP_BY_ARTIFACT = "artifact"
 _GROUP_BY_REPOSITORY = "repository"
 _GROUP_BY_FLAT = "flat"
+
+_VIEW_ALL = "all"
+_VIEW_CONFLICTS = "conflicts"
 
 _COLUMNS = ("Name", "Version", "Repository", "Module", "Scope", "Origin", "POM")
 
@@ -82,6 +88,13 @@ def _verdict_badge(classification: dict) -> str:
     if (classification or {}).get("overridden"):
         text += " *"
     return text
+
+
+def _menu_action(menu: QMenu, text: str, slot: Callable[[], None]) -> None:
+    """QMenu.addAction may return None per the Qt stubs — guard the wire-up."""
+    action = menu.addAction(text)
+    if action is not None:
+        action.triggered.connect(slot)
 
 
 def _classification_summary(classification: dict) -> str:
@@ -148,6 +161,39 @@ def build_dependency_explorer_pane(
     )
     _bump(j2ee_only, 2, 13)
     head_layout.addWidget(j2ee_only)
+
+    # All Dependencies / Conflicts segmented toggle (conflict count is
+    # recomputed from real scan results on every render).
+    view_all_btn = button("All Dependencies", "ghost")
+    view_all_btn.setObjectName("explorerViewAll")
+    view_all_btn.setCheckable(True)
+    view_all_btn.setChecked(True)
+    view_all_btn.setToolTip("Show every matching dependency usage")
+    _bump(view_all_btn, 2, 13)
+    head_layout.addWidget(view_all_btn)
+    view_conflicts_btn = button("Conflicts", "ghost")
+    view_conflicts_btn.setObjectName("explorerViewConflicts")
+    view_conflicts_btn.setCheckable(True)
+    view_conflicts_btn.setToolTip(
+        "Show only artifacts whose known versions differ across distinct\n"
+        "eligible repositories (dependencyManagement-only entries don't count\n"
+        "as usage; different versions are not necessarily a runtime conflict)"
+    )
+    _bump(view_conflicts_btn, 2, 13)
+    head_layout.addWidget(view_conflicts_btn)
+
+    copy_conflicts_btn = QToolButton()
+    copy_conflicts_btn.setObjectName("explorerCopyConflicts")
+    copy_conflicts_btn.setText("Copy conflicts")
+    copy_conflicts_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    copy_conflicts_btn.setToolTip(
+        "Copy the conflict report or Maven XML declarations (labeled formats)"
+    )
+    _bump(copy_conflicts_btn, 2, 13)
+    copy_conflicts_menu = QMenu(copy_conflicts_btn)
+    copy_conflicts_btn.setMenu(copy_conflicts_menu)
+    copy_conflicts_btn.hide()
+    head_layout.addWidget(copy_conflicts_btn)
     head_layout.addStretch(1)
     classify_btn = button("Classification…", "ghost")
     classify_btn.setObjectName("explorerClassify")
@@ -273,6 +319,8 @@ def build_dependency_explorer_pane(
         "loaded": False,
         "epoch": 0,
         "group_by": _GROUP_BY_ARTIFACT,
+        "view": _VIEW_ALL,
+        "visible_conflicts": [],
         "last_query": "",
     }
 
@@ -498,6 +546,52 @@ def build_dependency_explorer_pane(
             item.addChild(_usage_item(usage))
         return item
 
+    def _conflict_item(group: dict) -> QTreeWidgetItem:
+        coordinates = str(group["coordinates"])
+        if group.get("classifier"):
+            coordinates = (
+                f"{group['group_id']}:{group['artifact_id']}:"
+                f"{group['type']}:{group['classifier']}"
+            )
+        item = QTreeWidgetItem(
+            [
+                coordinates,
+                " · ".join(group["versions"]),
+                f"{len(group['known_repo_names'])} repo(s)",
+                "",
+                ", ".join(sorted(group["scopes"])),
+                ", ".join(sorted(group["origins"])),
+                "",
+            ]
+        )
+        item.setData(0, Qt.ItemDataRole.UserRole, {"kind": "conflict", "group": group})
+        tip = [
+            "Conflicting known versions: " + " vs ".join(group["versions"]),
+            "Repositories: " + ", ".join(sorted(group["known_repo_names"])),
+            "Versions may resolve differently per repository — not necessarily a runtime conflict.",
+        ]
+        if group.get("unresolved"):
+            tip.append(
+                f"{len(group['unresolved_usages'])} usage(s) with unresolved version "
+                "expressions (reported, never counted as a version)"
+            )
+        poms = sorted(group["pom_paths"])
+        tip.append("POMs: " + ", ".join(poms[:5]) + (" …" if len(poms) > 5 else ""))
+        item.setToolTip(0, "\n".join(tip))
+        for column in range(len(_COLUMNS)):
+            item.setToolTip(column, item.toolTip(0))
+        tint = token_qcolor("redSoft", fallback="#e06c6c")
+        if tint.alpha() == 255:
+            tint.setAlphaF(0.12)
+        for column in range(len(_COLUMNS)):
+            item.setBackground(column, tint)
+        for usage in group["usages"]:
+            child = _usage_item(usage)
+            if usage.version_source == "unresolved" or not usage.version:
+                child.setText(1, f"{usage.declared_version or '—'} (unresolved)")
+            item.addChild(child)
+        return item
+
     def _repo_item(group: dict) -> QTreeWidgetItem:
         classification = group.get("classification") or {}
         artifact_count = len(group.get("artifacts") or [])
@@ -552,6 +646,10 @@ def build_dependency_explorer_pane(
         card_repos.setText(f"{eligible}/{scanned}")
         card_artifacts.setText(str(summary["artifacts"]))
         card_duplicates.setText(str(summary["duplicates"]))
+        # Conflict analysis over the same filtered rows (real scan results).
+        conflicts = index.conflicts(rows)
+        state["visible_conflicts"] = conflicts
+        view_conflicts_btn.setText(f"Conflicts ({len(conflicts)})")
 
         # Partial-scan banner (failed repos / malformed POMs).
         problems: list[str] = []
@@ -574,12 +672,16 @@ def build_dependency_explorer_pane(
             status.setText("No repositories in this group.")
             return
         if j2ee_only.isChecked() and eligible == 0 and not query:
+            def _search_all() -> None:
+                j2ee_only.setChecked(False)
+                _render()
+
             _set_state_message(
                 "No J2EE projects found in this group.\n"
                 "Classification is evidence-based (packaging, EE APIs, descriptors) — "
                 "review it under Classification… or search all repositories instead.",
                 "Search all repositories",
-                lambda: (j2ee_only.setChecked(False), _render()),
+                _search_all,
             )
             status.setText(f"0 eligible J2EE repositories of {scanned} scanned.")
             return
@@ -589,6 +691,33 @@ def build_dependency_explorer_pane(
             )
             status.setText(
                 f"0 artifacts · scanned {scanned} repositor(ies) · {eligible} eligible J2EE"
+            )
+            return
+
+        if state["view"] == _VIEW_CONFLICTS:
+            if not conflicts:
+                _set_state_message(
+                    "No version conflicts across eligible repositories.\n"
+                    "A conflict needs ≥2 distinct known versions of the same "
+                    "artifact (groupId:artifactId:type:classifier) in ≥2 repositories; "
+                    "dependencyManagement-only entries don't count as usage."
+                )
+                status.setText(
+                    f"0 conflicts · {summary['artifacts']} artifact(s) · "
+                    f"{eligible}/{scanned} J2EE repositor(ies)"
+                    + (" · partial scan" if problems else "")
+                )
+                return
+            _hide_state_message()
+            for group in conflicts:
+                tree.addTopLevelItem(_conflict_item(group))
+            tree.expandAll()
+            tree.setSortingEnabled(True)
+            unresolved_n = sum(1 for group in conflicts if group.get("unresolved"))
+            status.setText(
+                f"{len(conflicts)} conflict(s) · {eligible}/{scanned} J2EE repositor(ies)"
+                + (f" · {unresolved_n} with unresolved versions" if unresolved_n else "")
+                + (" · partial scan" if problems else "")
             )
             return
 
@@ -715,11 +844,15 @@ def build_dependency_explorer_pane(
             if 0 <= row < len(entries):
                 classification = index.classification_for(path)
                 entries[row]["classification"] = classification
-                grid.item(row, 1).setText(
-                    VERDICT_LABELS.get(str(classification.get("verdict") or ""), "?")
+                updated_cells = (
+                    (1, VERDICT_LABELS.get(str(classification.get("verdict") or ""), "?")),
+                    (2, str(classification.get("confidence") or "")),
+                    (3, _classification_summary(classification)),
                 )
-                grid.item(row, 2).setText(str(classification.get("confidence") or ""))
-                grid.item(row, 3).setText(_classification_summary(classification))
+                for column, text in updated_cells:
+                    cell = grid.item(row, column)
+                    if cell is not None:
+                        cell.setText(text)
             _refresh_filter_combos()
             _render()
 
@@ -748,12 +881,33 @@ def build_dependency_explorer_pane(
         if usage is not None and usage.repo_path:
             open_dependency_view(usage.repo_path)
 
+    def _usage_row(usage) -> dict:
+        """Usage → the plain-dict shape the existing copy helpers expect."""
+        return {
+            "group_id": usage.group_id,
+            "artifact_id": usage.artifact_id,
+            "version": usage.version,
+            "scope": usage.scope,
+            "module_id": usage.module_id,
+            "profile": usage.profile,
+            "managed": usage.origin == "managed",
+        }
+
+    def _copy_to_clipboard(text: str, label: str) -> bool:
+        try:
+            QApplication.clipboard().setText(text)
+        except Exception as exc:  # noqa: BLE001 — clipboard access can fail (permissions)
+            logger.warning("clipboard write failed: %s", exc)
+            status.setText(f"Clipboard unavailable: {exc}")
+            return False
+        status.setText(f"Copied {label}")
+        return True
+
     def _copy_gav() -> None:
         usage = _selected_usage()
         if usage is None:
             return
-        QApplication.clipboard().setText(usage.gav())
-        status.setText(f"Copied {usage.gav()}")
+        _copy_to_clipboard(usage.gav(), usage.gav())
 
     def _reveal_pom() -> None:
         usage = _selected_usage()
@@ -772,6 +926,98 @@ def build_dependency_explorer_pane(
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(usage.pom_path))
 
+    def _selected_conflict() -> dict | None:
+        """Conflict group of the current top-level item, if any."""
+        item = tree.currentItem()
+        if item is None:
+            return None
+        top = item
+        while top.parent() is not None:
+            top = top.parent()
+        data = top.data(0, Qt.ItemDataRole.UserRole) or {}
+        return data.get("group") if data.get("kind") == "conflict" else None
+
+    def _selected_conflicts() -> list[dict]:
+        """Conflict groups of the selected top-level items (else current)."""
+        selected: list[dict] = []
+        for item in tree.selectedItems():
+            top = item
+            while top.parent() is not None:
+                top = top.parent()
+            data = top.data(0, Qt.ItemDataRole.UserRole) or {}
+            if data.get("kind") == "conflict" and data.get("group") not in selected:
+                selected.append(data["group"])
+        if not selected:
+            current = _selected_conflict()
+            if current is not None:
+                selected.append(current)
+        return selected
+
+    def _copy_conflicts_report(fmt: str = "tsv", *, selected_only: bool = False) -> None:
+        groups = _selected_conflicts() if selected_only else []
+        scope = "selected" if groups else "all visible"
+        if not groups:
+            groups = list(state.get("visible_conflicts") or [])
+        if not groups:
+            status.setText("No conflicts to copy.")
+            return
+        kind = "Markdown" if fmt == "markdown" else "TSV"
+        _copy_to_clipboard(
+            conflict_report_text(groups, fmt=fmt),
+            f"{len(groups)} conflict(s) ({scope}) as {kind} report",
+        )
+
+    def _copy_conflicts_gav(*, selected_only: bool = False) -> None:
+        groups = _selected_conflicts() if selected_only else []
+        scope = "selected" if groups else "all visible"
+        if not groups:
+            groups = list(state.get("visible_conflicts") or [])
+        if not groups:
+            status.setText("No conflicts to copy.")
+            return
+        seen: set = set()
+        lines: list[str] = []
+        for group in groups:
+            for usage in group["usages"]:
+                if usage.version_source == "unresolved" or not usage.version:
+                    continue  # never emit a fabricated version
+                key = (usage.group_id, usage.artifact_id, usage.version)
+                if key in seen:
+                    continue
+                seen.add(key)
+                lines.append(gav_string(_usage_row(usage)))
+        if not lines:
+            status.setText("No resolvable versions to copy.")
+            return
+        _copy_to_clipboard("\n".join(lines), f"{len(lines)} GAV(s) ({scope})")
+
+    def _copy_conflicts_xml(*, selected_only: bool = False) -> None:
+        groups = _selected_conflicts() if selected_only else []
+        scope = "selected" if groups else "all visible"
+        if not groups:
+            groups = list(state.get("visible_conflicts") or [])
+        if not groups:
+            status.setText("No conflicts to copy.")
+            return
+        seen: set = set()
+        snippets: list[str] = []
+        for group in groups:
+            for usage in group["usages"]:
+                if usage.version_source == "unresolved" or not usage.version:
+                    continue  # never emit a fabricated version
+                key = (usage.group_id, usage.artifact_id, usage.version)
+                if key in seen:
+                    continue
+                seen.add(key)
+                snippets.append(maven_xml_snippet(_usage_row(usage)))
+        if not snippets:
+            status.setText("No resolvable versions to copy.")
+            return
+        _copy_to_clipboard(
+            "\n\n".join(snippets),
+            f"{len(snippets)} Maven XML declaration(s) ({scope})",
+        )
+
     def _show_context_menu(pos) -> None:
         item = tree.itemAt(pos)
         if item is not None:
@@ -779,13 +1025,32 @@ def build_dependency_explorer_pane(
         if _selected_usage() is None:
             return
         menu = QMenu(tree)
-        menu.addAction("Open repository Dependency view").triggered.connect(
-            _open_repo_dependency_view
-        )
+        _menu_action(menu, "Open repository Dependency view", _open_repo_dependency_view)
         menu.addSeparator()
-        menu.addAction("Copy GAV").triggered.connect(_copy_gav)
-        menu.addAction("Open pom.xml").triggered.connect(_open_pom)
-        menu.addAction("Reveal pom.xml").triggered.connect(_reveal_pom)
+        _menu_action(menu, "Copy GAV", _copy_gav)
+        if _selected_conflict() is not None:
+            _menu_action(
+                menu,
+                "Copy GAV(s) (conflict versions)",
+                lambda: _copy_conflicts_gav(selected_only=True),
+            )
+            _menu_action(
+                menu,
+                "Copy Maven XML (conflict versions)",
+                lambda: _copy_conflicts_xml(selected_only=True),
+            )
+            _menu_action(
+                menu,
+                "Copy conflict report (TSV)",
+                lambda: _copy_conflicts_report("tsv", selected_only=True),
+            )
+            _menu_action(
+                menu,
+                "Copy conflict report (Markdown)",
+                lambda: _copy_conflicts_report("markdown", selected_only=True),
+            )
+        _menu_action(menu, "Open pom.xml", _open_pom)
+        _menu_action(menu, "Reveal pom.xml", _reveal_pom)
         menu.exec(tree.viewport().mapToGlobal(pos))
 
     # ----------------------------------------------------------------- groups
@@ -818,7 +1083,25 @@ def build_dependency_explorer_pane(
         )
         _render()
 
+    def _set_view(view: str) -> None:
+        """Switch between the All Dependencies and Conflicts views."""
+        state["view"] = view
+        view_all_btn.setChecked(view == _VIEW_ALL)
+        view_conflicts_btn.setChecked(view == _VIEW_CONFLICTS)
+        groupby_combo.setEnabled(view == _VIEW_ALL)
+        copy_conflicts_btn.setVisible(view == _VIEW_CONFLICTS)
+        _render()
+
     # ----------------------------------------------------------------- wiring
+    _menu_action(copy_conflicts_menu, "Copy all conflicts (TSV report)",
+                 lambda: _copy_conflicts_report("tsv"))
+    _menu_action(copy_conflicts_menu, "Copy all conflicts (Markdown report)",
+                 lambda: _copy_conflicts_report("markdown"))
+    _menu_action(copy_conflicts_menu, "Copy all Maven XML", lambda: _copy_conflicts_xml())
+
+    view_all_btn.clicked.connect(lambda _c=False: _set_view(_VIEW_ALL))
+    view_conflicts_btn.clicked.connect(lambda _c=False: _set_view(_VIEW_CONFLICTS))
+
     filter_timer = QTimer(root)
     filter_timer.setSingleShot(True)
     filter_timer.setInterval(150)
@@ -838,7 +1121,7 @@ def build_dependency_explorer_pane(
     tree.itemDoubleClicked.connect(lambda _item, _column: _open_repo_dependency_view())
 
     if events is not None:
-        def _on_setting_changed(key: str = None, value=None) -> None:
+        def _on_setting_changed(key: str | None = None, value=None) -> None:
             if key == "appearance.theme" and state.get("loaded"):
                 _render()  # re-tint divergence rows for the new theme
 
@@ -851,10 +1134,17 @@ def build_dependency_explorer_pane(
     root.state = state  # type: ignore[attr-defined]
     root.overrides = overrides  # type: ignore[attr-defined]
     root.rescan = _scan  # type: ignore[attr-defined]
-    root.render = _render  # type: ignore[attr-defined]
+    # ``redraw`` deliberately avoids the QWidget.render name (Qt's own method).
+    root.redraw = _render  # type: ignore[attr-defined]
     root.open_classification = _open_classification_dialog  # type: ignore[attr-defined]
     root.open_repo_dependency_view = _open_repo_dependency_view  # type: ignore[attr-defined]
-    root.ensure_scanned = (  # type: ignore[attr-defined]
+    root.set_view = _set_view  # type: ignore[attr-defined]
+    root.copy_conflicts_report = _copy_conflicts_report  # type: ignore[attr-defined]
+    root.copy_conflicts_gav = _copy_conflicts_gav  # type: ignore[attr-defined]
+    root.copy_conflicts_xml = _copy_conflicts_xml  # type: ignore[attr-defined]
+    # ``QWidget`` has no such attributes — attaching the pane API is the
+    # established factory pattern in this package (see maven_deps).
+    root.ensure_scanned = (  # type: ignore
         (lambda: _scan()) if not state["loaded"] else (lambda: None)
     )
     root.visible_statuses = lambda: [  # type: ignore[attr-defined]

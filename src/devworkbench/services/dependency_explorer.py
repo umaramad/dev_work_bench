@@ -661,11 +661,90 @@ def compare_versions(a: str, b: str) -> int:
     return 0
 
 
-def version_sort_key(version: str) -> list[tuple[int, int, str]]:
-    return parse_version(version)
+def version_sort_key(version: str) -> Any:
+    """Sort key implementing full Maven ordering.
+
+    Built on :func:`compare_versions` (via ``cmp_to_key``) so trailing
+    zeros (``1.0`` vs ``1.0.0``) and qualifier padding (``1.0-rc1`` <
+    ``1.0``) sort correctly — a plain token-list key gets both wrong.
+    """
+    from functools import cmp_to_key
+
+    return cmp_to_key(compare_versions)(str(version or ""))
 
 
-def normalize_coordinate(group_id: str, artifact_id: str) -> tuple[str, str]:
+def conflict_key(usage: Usage) -> tuple[str, str, str, str]:
+    """Conflict identity: normalized coordinates plus type and classifier.
+
+    Two usages are the same artifact only when groupId, artifactId, type
+    (default ``jar``) and classifier all match — a ``sources`` or ``tests``
+    artifact must never merge with the main artifact.
+    """
+    return (
+        str(usage.group_id or "").strip(),
+        str(usage.artifact_id or "").strip(),
+        (str(usage.type or "").strip() or "jar"),
+        str(usage.classifier or "").strip(),
+    )
+
+
+def conflict_report_text(conflicts: Iterable[dict], *, fmt: str = "tsv") -> str:
+    """Readable conflict report for the clipboard (one row per usage).
+
+    Follows the ``dependencies_table_text`` conventions: ``tsv``
+    (tab-separated, Excel-friendly) or ``markdown``; the ``note`` column
+    carries ``unresolved`` for usages whose version expression could not be
+    resolved — never a fabricated version.
+    """
+    headers = (
+        "groupId",
+        "artifactId",
+        "type",
+        "classifier",
+        "version",
+        "repository",
+        "module",
+        "scope",
+        "origin",
+        "pom",
+        "note",
+    )
+    rows: list[tuple[str, ...]] = []
+    for group in conflicts:
+        for usage in group.get("usages") or []:
+            unresolved = usage.version_source == "unresolved" or not usage.version
+            rows.append(
+                (
+                    str(group.get("group_id") or usage.group_id or ""),
+                    str(group.get("artifact_id") or usage.artifact_id or ""),
+                    str(usage.type or group.get("type") or "jar"),
+                    str(usage.classifier or group.get("classifier") or ""),
+                    usage.version or (usage.declared_version if unresolved else ""),
+                    usage.repo_name,
+                    usage.module_id,
+                    usage.scope,
+                    usage.origin,
+                    usage.pom_path,
+                    "unresolved" if unresolved else "",
+                )
+            )
+
+    if fmt == "markdown":
+        lines = [
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join("---" for _ in headers) + " |",
+        ]
+        for row in rows:
+            safe = [c.replace("|", "\\|") for c in row]
+            lines.append("| " + " | ".join(safe) + " |")
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    lines = ["\t".join(headers)]
+    lines.extend("\t".join(row) for row in rows)
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def normalize_coordinate(group_id: Any, artifact_id: Any) -> tuple[str, str]:
     """Normalized (groupId, artifactId) for duplicate detection.
 
     Maven coordinates are case-sensitive, so normalization only trims
@@ -1043,6 +1122,94 @@ class ArtifactIndex:
             for group in self.artifact_groups(usages)
             if group["cross_repo"] or group["version_divergence"]
         ]
+
+    def conflicts(self, usages: Iterable[Usage] | None = None) -> list[dict]:
+        """Cross-repository Maven *version* conflicts, strictly defined.
+
+        An artifact conflicts when the same ``(groupId, artifactId, type,
+        classifier)`` carries **two or more semantically distinct, known**
+        versions across **two or more distinct repositories**:
+
+        * identities include type/classifier so e.g. a ``sources`` or
+          ``tests`` artifact is never merged with the main artifact;
+        * versions are compared with :func:`parse_version` (Maven order),
+          and ``1.0`` vs ``1.0.0`` are the same version;
+        * ``dependencyManagement``-only rows (``origin == "managed"``) are
+          excluded — a managed version is not proof the dependency is used;
+        * unresolved ``${…}`` versions never invent a version: they ride
+          along in ``unresolved_usages`` for reporting only.
+
+        Different versions *may* resolve differently per repository — that
+        is not a claim of a runtime conflict.
+        """
+        rows = [
+            u
+            for u in (usages if usages is not None else self._usages)
+            if u.origin != "managed"
+        ]
+        grouped: dict[tuple[str, str, str, str], dict] = {}
+        for usage in rows:
+            key = conflict_key(usage)
+            group = grouped.get(key)
+            if group is None:
+                group = {
+                    "group_id": key[0],
+                    "artifact_id": key[1],
+                    "type": key[2],
+                    "classifier": key[3],
+                    "coordinates": usage.coordinates,
+                    "usages": [],
+                    "versions_seen": [],
+                    "unresolved_usages": [],
+                    "known_repos": set(),
+                    "known_repo_names": set(),
+                    "repos": set(),
+                    "repo_names": set(),
+                    "scopes": set(),
+                    "origins": set(),
+                    "pom_paths": set(),
+                }
+                grouped[key] = group
+            group["usages"].append(usage)
+            group["repos"].add(usage.repo_path)
+            group["repo_names"].add(usage.repo_name)
+            group["scopes"].add(usage.scope)
+            group["origins"].add(usage.origin)
+            if usage.pom_path:
+                group["pom_paths"].add(usage.pom_path)
+            if usage.version and usage.version_source != "unresolved":
+                # Semantic dedupe: "1.0" and "1.0.0" are one Maven version.
+                known = group["versions_seen"]
+                if not any(compare_versions(usage.version, seen) == 0 for seen in known):
+                    known.append(usage.version)
+                group["known_repos"].add(usage.repo_path)
+                group["known_repo_names"].add(usage.repo_name)
+            else:
+                group["unresolved_usages"].append(usage)
+
+        out: list[dict] = []
+        for group in grouped.values():
+            versions = sorted(group.pop("versions_seen"), key=version_sort_key)
+            if len(versions) < 2:
+                continue  # one known version (or none) is not a conflict
+            if len(group["known_repos"]) < 2:
+                continue  # cross-*repository* conflict analysis only
+            group["versions"] = versions
+            group["unresolved"] = bool(group["unresolved_usages"])
+            group["conflict"] = True
+            group["usages"].sort(
+                key=lambda u: (version_sort_key(u.version), u.repo_name.casefold(), u.module_id)
+            )
+            out.append(group)
+        out.sort(
+            key=lambda g: (
+                str(g["group_id"]).casefold(),
+                str(g["artifact_id"]).casefold(),
+                str(g["type"]).casefold(),
+                str(g["classifier"]).casefold(),
+            )
+        )
+        return out
 
     def summary(self, usages: Iterable[Usage] | None = None) -> dict:
         rows = list(usages) if usages is not None else list(self._usages)
