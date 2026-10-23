@@ -867,7 +867,7 @@ def build_dependency_explorer_pane(
         data = item.data(0, Qt.ItemDataRole.UserRole) or {}
         if data.get("kind") == "usage":
             return data.get("usage")
-        if data.get("kind") == "artifact" and data.get("group"):
+        if data.get("kind") in ("artifact", "conflict") and data.get("group"):
             group = data["group"]
             return (group.get("usages") or [None])[0]
         if data.get("kind") == "repository" and data.get("group"):
